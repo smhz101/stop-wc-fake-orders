@@ -2,7 +2,7 @@
 /*
 Plugin Name: Stop WooCommerce Fake Orders
 Description: Edge gate + IP/CIDR allowlist + optional HMAC + Redis-backed IP/email rate limits/bans + REST abuse protection + JS cookie + honeypot + success-resets + admin UI + logs export + per-route exemptions + header bypass + optional CAPTCHA-after-soft-block + CIDR soft deny (429). Single file.
-Version: 2.1.0
+Version: 2.2.0
 Author: Muzammil
 License: GPLv2+
 */
