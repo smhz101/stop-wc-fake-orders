@@ -789,7 +789,7 @@ class SWFO_Plugin {
 		if ( isset($_POST['swfo_save']) && check_admin_referer('swfo_save', 'swfo_nonce') ) {
 			$this->save_settings();
 			$this->setup_redis();
-			$tab = isset($_POST['swfo_tab']) ? sanitize_text_field($_POST['swfo_tab']) : 'status';
+			$tab = isset($_POST['swfo_tab']) ? sanitize_text_field( wp_unslash( $_POST['swfo_tab'] ) ) : 'status';
 			wp_safe_redirect( $this->tab_url($tab) ); // preserves ?swfo_tab=... and #...
 			exit;
 		}
@@ -1213,9 +1213,9 @@ class SWFO_Plugin {
 				<h2 class="title">Recent Events</h2>					
 				<?php
 				// --- Filters (GET): events_q (search), events_type (type), events_p (page)
-				$ev_q    = isset($_GET['events_q'])    ? sanitize_text_field($_GET['events_q'])    : '';
-				$ev_type = isset($_GET['events_type']) ? sanitize_text_field($_GET['events_type']) : '';
-				$ev_p    = isset($_GET['events_p'])    ? max(1, intval($_GET['events_p']))         : 1;
+				$ev_q    = isset($_GET['events_q']) ? sanitize_text_field( wp_unslash( $_GET['events_q'] ) ) : '';
+				$ev_type = isset($_GET['events_type']) ? sanitize_text_field( wp_unslash( $_GET['events_type'] ) ) : '';
+				$ev_p    = isset($_GET['events_p']) ? max( 1, intval( wp_unslash( $_GET['events_p'] ) ) ) : 1;
 
 				// unique types for dropdown
 				$types = array_values(array_unique(array_map(function($r){ return $r['type'] ?? ''; }, $logs)));
@@ -1295,10 +1295,10 @@ class SWFO_Plugin {
 				$hits = $this->api_hits_get();
 
 				// Filters: hits_q (path/data), hits_ip, hits_method, hits_p
-				$h_q   = isset($_GET['hits_q'])   ? sanitize_text_field($_GET['hits_q'])   : '';
-				$h_ip  = isset($_GET['hits_ip'])  ? sanitize_text_field($_GET['hits_ip'])  : '';
-				$h_m   = isset($_GET['hits_m'])   ? strtoupper(sanitize_text_field($_GET['hits_m'])) : '';
-				$h_p   = isset($_GET['hits_p'])   ? max(1, intval($_GET['hits_p'])) : 1;
+				$h_q   = isset($_GET['hits_q']) ? sanitize_text_field( wp_unslash( $_GET['hits_q'] ) ) : '';
+				$h_ip  = isset($_GET['hits_ip']) ? sanitize_text_field( wp_unslash( $_GET['hits_ip'] ) ) : '';
+				$h_m   = isset($_GET['hits_m']) ? strtoupper( sanitize_text_field( wp_unslash( $_GET['hits_m'] ) ) ) : '';
+				$h_p   = isset($_GET['hits_p']) ? max( 1, intval( wp_unslash( $_GET['hits_p'] ) ) ) : 1;
 
 				$methods = array_values(array_unique(array_map(function($r){ return strtoupper($r['m']??''); }, $hits)));
 				sort($methods);
@@ -1446,7 +1446,7 @@ class SWFO_Plugin {
 			'window_seconds','ip_rate_limit','email_rate_limit','required_cookie','hmac_secret','redis_host','redis_port','logs_max','webhook_url','captcha_after_soft_blocks'
 		];
 		foreach($fields as $f){
-			if(isset($_POST[$f])) update_option(SWFO_Opt::k($f), is_numeric($_POST[$f])?intval($_POST[$f]):sanitize_text_field($_POST[$f]));
+			if( isset( $_POST[$f] ) ) update_option( SWFO_Opt::k($f), is_numeric( wp_unslash( $_POST[$f] ) ) ? intval( wp_unslash( $_POST[$f] ) ) : sanitize_text_field( wp_unslash( $_POST[$f] ) ) );
 		}
 		update_option(SWFO_Opt::k('enable_js_challenge'), isset($_POST['enable_js_challenge']));
 		update_option(SWFO_Opt::k('enable_honeypot'), isset($_POST['enable_honeypot']));
@@ -1460,7 +1460,7 @@ class SWFO_Plugin {
 
 		// Redis auth/db (respect constants if defined)
 		if ( ! defined('SWFO_REDIS_AUTH') && isset($_POST['redis_auth']) ) {
-			$val = sanitize_text_field( wp_unslash($_POST['redis_auth']) );
+			$val = sanitize_text_field( wp_unslash( $_POST['redis_auth'] ) );
 			// Treat ******** as mask ONLY if that exact value was shown by us
 			$masked = '********';
 			if ( $val !== $masked ) {
@@ -1473,7 +1473,7 @@ class SWFO_Plugin {
 
 		if(isset($_POST['store_api_rate_limit'])) update_option(SWFO_Opt::k('store_api_rate_limit'), max(10, intval($_POST['store_api_rate_limit'])));
 		if(isset($_POST['store_api_mode'])){
-			$m = sanitize_text_field($_POST['store_api_mode']);
+			$m = sanitize_text_field( wp_unslash( $_POST['store_api_mode'] ) );
 			if(in_array($m, ['open','same-origin','js-cookie','api-key'], true)){
 				update_option(SWFO_Opt::k('store_api_mode'), $m);
 			}
@@ -1544,7 +1544,7 @@ class SWFO_Plugin {
 	 */
 	function handle_delete_key(){
 		if(!current_user_can('manage_options') || !wp_verify_nonce($_GET['_wpnonce']??'','swfo_del_key')) wp_die('Forbidden');
-		$id=sanitize_text_field($_GET['id']??'');
+		$id=sanitize_text_field(wp_unslash($_GET['id']??''));
 		$keys = get_option(SWFO_Opt::k('api_keys'),[]);
 		if(isset($keys[$id])){ unset($keys[$id]); update_option(SWFO_Opt::k('api_keys'),$keys); }
 		wp_redirect(admin_url('admin.php?page=swfo')); exit;
@@ -1578,7 +1578,7 @@ class SWFO_Plugin {
 	 */
 	function handle_add_bypass(){
 		if ( ! current_user_can('manage_options') || ! check_admin_referer('swfo_add_bypass') ) wp_die('Forbidden');
-		$name = sanitize_text_field($_POST['bp_name']??'bp_'.time());
+		$name = sanitize_text_field(wp_unslash($_POST['bp_name']??'bp_'.time()));
 		$tok  = trim($_POST['bp_token']??'');
 		if($tok==='') $tok = bin2hex(random_bytes(16));
 		$bp = get_option(SWFO_Opt::k('bypass_tokens'),[]);
@@ -1616,7 +1616,7 @@ class SWFO_Plugin {
 	 */	
 	function handle_delete_bypass(){
 		if(!current_user_can('manage_options') || !wp_verify_nonce($_GET['_wpnonce']??'','swfo_del_bp')) wp_die('Forbidden');
-		$name=sanitize_text_field($_GET['name']??'');
+		$name=sanitize_text_field(wp_unslash($_GET['name']??''));
 		$bp = get_option(SWFO_Opt::k('bypass_tokens'),[]);
 		if(isset($bp[$name])){ unset($bp[$name]); update_option(SWFO_Opt::k('bypass_tokens'),$bp); }
 		wp_redirect(admin_url('admin.php?page=swfo')); exit;
@@ -2075,8 +2075,7 @@ class SWFO_Plugin {
 	 *
 	 * @return void
 	 */
-	function enqueue_js() {
-		
+	function enqueue_js(){
 		wp_localize_script( 'jquery-core', 'SWFOi18n', array(
     	'captchaPrompt' => __( 'Please solve the anti-bot check correctly.', 'stop-woocommerce-fake-orders' ),
     	'jsRequired'    => __( 'Please enable JavaScript to continue.', 'stop-woocommerce-fake-orders' ),
