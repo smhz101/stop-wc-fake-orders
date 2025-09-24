@@ -105,11 +105,246 @@ class SWFO_Plugin {
 		add_action('admin_post_swfo_export_hits', [$this,'handle_export_api_hits']);
 		add_action('admin_post_swfo_clear_hits',  [$this,'handle_clear_api_hits']);
 
-		add_action('admin_enqueue_scripts', function($hook){
-			if ($hook === 'woocommerce_page_swfo') {
-				wp_register_script('chartjs', 'https://cdn.jsdelivr.net/npm/chart.js', [], null, true);
+		// Admin assets + AJAX endpoints
+		add_action( 'admin_enqueue_scripts', [ $this, 'admin_enqueue_assets' ] );
+		add_action( 'wp_ajax_swfo_get_events', [ $this, 'ajax_get_events' ] );
+		add_action( 'wp_ajax_swfo_get_hits',   [ $this, 'ajax_get_hits' ] );
+
+	}
+
+	/**
+	 * Enqueue admin assets only on our screen and localize runtime data.
+	 */
+	public function admin_enqueue_assets( $hook ) {
+		if ( 'woocommerce_page_swfo' !== $hook ) {
+			return;
+		}
+
+		// Lightweight inline module (no external file to keep single-file plugin)
+		wp_register_script( 'swfo-admin', false, [ 'jquery' ], '2.1.0', true );
+
+		wp_localize_script(
+			'swfo-admin',
+			'SWFOData',
+			[
+				'ajax_url'      => admin_url( 'admin-ajax.php' ),
+				'nonce'         => wp_create_nonce( 'swfo_admin' ),
+				'poll_interval' => 7000, // ms
+				'i18n'          => [
+					'banConfirm' => __( 'Clear all API hits?', 'default' ), // (example—reuse if needed)
+				],
+			]
+		);
+
+		wp_add_inline_script( 'swfo-admin', $this->admin_polling_js() );
+		wp_enqueue_script( 'swfo-admin' );
+	}
+
+	/**
+	 * Returns the polling JS (kept here to avoid separate file).
+	 */
+	private function admin_polling_js() {
+		return <<<JS
+	(function($){
+		'use strict';
+
+		var lastEventTs = 0;
+		var lastHitTs   = 0;
+		var timer       = null;
+
+		function activeTab(){
+			var \$a = $('.nav-tab.nav-tab-active');
+			return \$a.length ? \$a.data('tab') : 'status';
+		}
+
+		function start(){
+			stop();
+			timer = setInterval(fetchUpdates, SWFOData.poll_interval || 7000);
+		}
+
+		function stop(){
+			if (timer) { clearInterval(timer); timer = null; }
+		}
+
+		function fetchUpdates(){
+			var tab = activeTab();
+			if (tab === 'events') {
+				getJSON('swfo_get_events', lastEventTs, function(items){
+					if (!items || !items.length) { return; }
+					lastEventTs = Math.max.apply(null, items.map(function(i){ return i.t || 0; }));
+					appendEvents(items);
+				});
+			} else if (tab === 'apihits') {
+				getJSON('swfo_get_hits', lastHitTs, function(items){
+					if (!items || !items.length) { return; }
+					lastHitTs = Math.max.apply(null, items.map(function(i){ return i.t || 0; }));
+					appendHits(items);
+				});
 			}
+		}
+
+		function getJSON(action, since, cb){
+			$.ajax({
+				url: SWFOData.ajax_url,
+				method: 'GET',
+				dataType: 'json',
+				data: {
+					action: action,
+					since: since || 0,
+					_ajax_nonce: SWFOData.nonce
+				}
+			}).done(function(resp){
+				if (resp && resp.success && resp.data && resp.data.items) {
+					cb(resp.data.items);
+				}
+			});
+		}
+
+		// --- DOM helpers (prepend newest-first, cap table length a bit) ---
+		function appendEvents(items){
+			var \$tbody = $('#swfo-events-body');
+			if (!\$tbody.length) { return; }
+			// Items already newest-first; prepend in reverse so the very newest ends up on top
+			items.slice().reverse().forEach(function(row){
+				var dt = row.t ? formatTs(row.t) : '';
+				var type = esc(row.type || '');
+				var note = esc(row.note || '');
+				var \$tr = $('<tr/>')
+					.append($('<td/>').text(dt))
+					.append($('<td/>').text(type))
+					.append($('<td/>').text(note));
+				\$tbody.prepend(\$tr);
+			});
+			trimRows(\$tbody, 500);
+		}
+
+		function appendHits(items){
+			var \$tbody = $('#swfo-hits-body');
+			if (!\$tbody.length) { return; }
+			items.slice().reverse().forEach(function(h){
+				var dt = h.t ? formatTs(h.t) : '';
+				var ip = esc(h.ip || '');
+				var m  = esc((h.m || '').toUpperCase());
+				var p  = esc(h.path || h.route || '');
+				var d  = (typeof h.data === 'object') ? JSON.stringify(h.data).slice(0,3000) : String(h.data || '');
+				var \$tr = $('<tr/>')
+					.append($('<td/>').text(dt))
+					.append($('<td/>').append($('<code/>').text(ip)))
+					.append($('<td/>').text(m))
+					.append($('<td/>').append($('<code/>').text(p)))
+					.append($('<td/>').append($('<code style="white-space:pre-wrap;word-break:break-word;display:block;max-height:6.5em;overflow:auto;"/>').text(d)));
+				\$tbody.prepend(\$tr);
+			});
+			trimRows(\$tbody, 500);
+		}
+
+		function trimRows(\$tbody, limit){
+			var \$rows = \$tbody.find('tr');
+			if (\$rows.length > limit) {
+				\$rows.slice(limit).remove();
+			}
+		}
+
+		function formatTs(t){
+			var d = new Date(t * 1000);
+			var pad = function(n){ return n<10 ? '0'+n : n; };
+			return d.getFullYear() + '-' + pad(d.getMonth()+1) + '-' + pad(d.getDate()) + ' ' +
+						pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+		}
+
+		function esc(s){
+			// jQuery will handle text() escaping; this is for non-jQuery string contexts if needed
+			return String(s);
+		}
+
+		// attach listeners to tabs to start/stop polling
+		$(document).on('click', '.nav-tab', function(){
+			// Defer to allow your existing tab switcher to run
+			setTimeout(function(){
+				var tab = activeTab();
+				if (tab === 'events' || tab === 'apihits') { start(); } else { stop(); }
+			}, 0);
 		});
+
+		// initialize on load
+		$(function(){
+			// derive initial last timestamps from first row if needed (optional)
+			var \$firstEvent = $('#swfo-events-body tr:first td:first');
+			if (\$firstEvent.length) { lastEventTs = Math.floor(Date.now()/1000); }
+			var \$firstHit = $('#swfo-hits-body tr:first td:first');
+			if (\$firstHit.length) { lastHitTs = Math.floor(Date.now()/1000); }
+
+			var tab = activeTab();
+			if (tab === 'events' || tab === 'apihits') { start(); }
+		});
+
+		$(window).on('beforeunload', stop);
+	})(jQuery);
+	JS;
+	}
+
+	/**
+	 * AJAX: Return recent events since a UNIX timestamp.
+	 */
+	public function ajax_get_events() {
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_send_json_error( [ 'message' => 'forbidden' ], 403 );
+		}
+		check_ajax_referer( 'swfo_admin', '_ajax_nonce' );
+
+		$since = isset( $_GET['since'] ) ? intval( $_GET['since'] ) : 0;
+
+		$logs = $this->logs_get();
+		if ( $since > 0 ) {
+			$logs = array_values(
+				array_filter(
+					(array) $logs,
+					static function( $r ) use ( $since ) {
+						$t = isset( $r['t'] ) ? (int) $r['t'] : 0;
+						return ( $t > $since );
+					}
+				)
+			);
+		}
+
+		wp_send_json_success(
+			[
+				'items'       => $logs,
+				'server_time' => time(),
+			]
+		);
+	}
+
+	/**
+	 * AJAX: Return API hits since a UNIX timestamp.
+	 */
+	public function ajax_get_hits() {
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_send_json_error( [ 'message' => 'forbidden' ], 403 );
+		}
+		check_ajax_referer( 'swfo_admin', '_ajax_nonce' );
+
+		$since = isset( $_GET['since'] ) ? intval( $_GET['since'] ) : 0;
+
+		$hits = $this->api_hits_get();
+		if ( $since > 0 ) {
+			$hits = array_values(
+				array_filter(
+					(array) $hits,
+					static function( $r ) use ( $since ) {
+						$t = isset( $r['t'] ) ? (int) $r['t'] : 0;
+						return ( $t > $since );
+					}
+				)
+			);
+		}
+
+		wp_send_json_success(
+			[
+				'items'       => $hits,
+				'server_time' => time(),
+			]
+		);
 	}
 
 	/**
@@ -717,7 +952,7 @@ class SWFO_Plugin {
 				<?php else: ?>
 					<table class="widefat striped">
 						<thead><tr><th style="width:160px;">Time</th><th style="width:180px;">Type</th><th>Note</th></tr></thead>
-						<tbody>
+						<tbody id="swfo-events-body">
 						<?php foreach($rows as $l): ?>
 							<tr>
 								<td><?php echo esc_html(date('Y-m-d H:i:s',$l['t'])); ?></td>
@@ -808,7 +1043,7 @@ class SWFO_Plugin {
 								<th>Data (masked)</th>
 							</tr>
 						</thead>
-						<tbody>
+						<tbody id="swfo-hits-body">
 							<?php foreach($rows as $h): 
 								$dt = isset($h['t']) ? date('Y-m-d H:i:s', (int)$h['t']) : '';
 								$ip = esc_html($h['ip'] ?? '');
