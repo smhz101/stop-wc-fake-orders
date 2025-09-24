@@ -1,11 +1,15 @@
 <?php
-/*
-Plugin Name: Stop WooCommerce Fake Orders
-Description: Edge gate + IP/CIDR allowlist + optional HMAC + Redis-backed IP/email rate limits/bans + REST abuse protection + JS cookie + honeypot + success-resets + admin UI + logs export + per-route exemptions + header bypass + optional CAPTCHA-after-soft-block + CIDR soft deny (429). Single file.
-Version: 2.2.0
-Author: Muzammil
-License: GPLv2+
-*/
+/**
+ * Plugin Name: Stop WooCommerce Fake Orders
+ *  Description: Edge gate + IP/CIDR allowlist + optional HMAC + Redis-backed IP/email rate limits/bans + REST abuse protection + JS cookie + honeypot + success-resets + admin UI + logs export + per-route exemptions + header bypass + optional CAPTCHA-after-soft-block + CIDR soft deny (429). Single file.
+ * Version: 2.3.0
+ * Author: Muzammil
+ * Text Domain: stop-woocommerce-fake-orders
+ * Domain Path: /languages
+ * Requires at least: 6.0
+ * Requires PHP: 7.4
+ * License URI: https://www.gnu.org/licenses/gpl-2.0.html
+ */
 
 if (!defined('ABSPATH')) exit;
 
@@ -17,13 +21,103 @@ if (!defined('SWFO_USE_REDIS')) define('SWFO_USE_REDIS', false); // set true in 
 if (!defined('SWFO_REDIS_AUTH')) define('SWFO_REDIS_AUTH', '');  // e.g. 'mySecretPass' (leave '' if none)
 if (!defined('SWFO_REDIS_DB'))   define('SWFO_REDIS_DB', 0);     // e.g. 0..15
 
-/** ===== Option helper ===== */
+
+/**
+ * Class SWFO_Opt
+ *
+ * Provides utility functions for the Stop WC Fake Orders plugin.
+ */
+ 
+/**
+ * Generate a prefixed option key.
+ *
+ * @param string $n The option name to be prefixed.
+ * @return string The prefixed option key.
+ */
 class SWFO_Opt { static function k($n){ return SWFO_PREFIX.$n; } }
 
-/** ===== Main ===== */
+/**
+ * Main plugin class for Stop WC Fake Orders.
+ *
+ * Handles initialization and core functionality for the Stop WC Fake Orders plugin.
+ */
 class SWFO_Plugin {
+	/**
+	 * Holds the singleton instance of the class.
+	 *
+	 * @var self
+	 */
 	private static $inst;
-	private $redis=null,$use_redis=false;
+
+	/**
+	 * @var Redis|null $redis Instance of Redis client or null if not initialized.
+	 * @var bool $use_redis Flag to indicate whether Redis should be used.
+	 */
+	private $redis=null, 
+					$use_redis=false;
+
+	/**
+	 * Default plugin options.
+	 *
+	 * Associative array of option keys and their default values. These are written
+	 * to the database on first run (see ensure_defaults()) and can be overridden
+	 * via the admin UI or wp-config.php constants where noted.
+	 *
+	 * Keys:
+	 * - 'api_keys' (array<string,string>): Map of key IDs to password_hash()'d API
+	 *   keys used for S2S auth via the X-WC-API-Key header.
+	 * - 'allowlist_cidrs' (string[]): IPv4/IPv6 CIDRs or plain IPs that bypass
+	 *   most gates (partners, office ranges).
+	 * - 'ua_denylist' (string[]): Case-insensitive substrings; if matched in the
+	 *   User-Agent, the request is blocked.
+	 * - 'required_cookie' (string): Name of the JS challenge cookie set on
+	 *   checkout to prove a real browser (default 'swfo_js').
+	 * - 'enable_js_challenge' (bool): If true, require the JS cookie for sensitive
+	 *   actions (REST checkout/orders, form checkout).
+	 * - 'enable_honeypot' (bool): If true, add/validate a hidden honeypot field on
+	 *   checkout (REST + form).
+	 * - 'enable_hmac' (bool): If true, require HMAC headers (X-WC-HMAC,
+	 *   X-WC-Timestamp) when an API key is supplied.
+	 * - 'hmac_secret' (string): Shared secret used to compute request signatures
+	 *   when HMAC is enabled.
+	 * - 'window_seconds' (int): Sliding window length in seconds for rate limits.
+	 * - 'ip_rate_limit' (int): Max REST calls per IP per window (general gate).
+	 * - 'email_rate_limit' (int): Max checkout attempts per billing email per
+	 *   window.
+	 * - 'logs_max' (int): Number of recent events to retain in the in-memory/Redis
+	 *   queue.
+	 * - 'use_redis' (bool): Whether to use phpredis for counters/logs. Can also be
+	 *   forced via SWFO_USE_REDIS.
+	 * - 'redis_host' (string): Redis host (default '127.0.0.1').
+	 * - 'redis_port' (int): Redis port (default 6379).
+	 * - 'redis_auth' (string): Optional Redis AUTH password. Prefer the
+	 *   SWFO_REDIS_AUTH constant in wp-config.php for secrets.
+	 * - 'redis_db' (int): Optional Redis database index (0..15). Prefer
+	 *   SWFO_REDIS_DB constant.
+	 * - 'log_to_error_log' (bool): If true, mirror events to PHP error_log.
+	 * - 'webhook_url' (string): If non-empty, send JSON event payloads to this
+	 *   URL asynchronously (non-blocking).
+	 * - 'captcha_enabled' (bool): If true, enable simple math CAPTCHA on checkout
+	 *   (REST + form).
+	 * - 'captcha_after_soft_blocks' (int): Threshold of soft blocks before
+	 *   CAPTCHA is enforced in REST (form always enforces when enabled).
+	 * - 'bypass_tokens' (array<string,string>): Map of bypass token names to
+	 *   tokens for trusted jobs via X-SWFO-Bypass header.
+	 * - 'soft_deny_cidrs' (string[]): CIDRs that receive HTTP 429 (soft deny) to
+	 *   discourage probing without revealing explicit blocking.
+	 * - 'enable_api_hit_logging' (bool): Master switch for wp-json traffic logging.
+	 * - 'api_hits_max' (int): Number of REST hit entries to keep (Redis list or
+	 *   transient ring).
+	 * - 'store_api_write_rate_limit' (int): Max write calls to Store API cart /
+	 *   checkout per IP per window.
+	 * - 'store_api_mode' (string): Store API protection mode: 'open',
+	 *   'same-origin' (default), 'js-cookie', or 'api-key'.
+	 * - 'store_api_rate_limit' (int): Max GET reads to Store API per IP per
+	 *   window.
+	 *
+	 * @var array<string,mixed>
+	 * @since 1.0.0
+	 */
 	private $defaults = [
 		'api_keys'=>[],                 // [id => password_hash(key)]
 		'allowlist_cidrs'=>[],          // [ '1.2.3.0/24', ... ]
@@ -61,8 +155,54 @@ class SWFO_Plugin {
 		'store_api_rate_limit' => 120,     // GETs/window for /wc/store/* (per IP)
 	];
 
-	static function boot(){ if(!self::$inst){ self::$inst=new self; self::$inst->init(); } return self::$inst; }
+	/**
+	 * Bootstrap the singleton instance and initialize plugin hooks.
+	 *
+	 * Creates the plugin instance on first call, runs {@see SWFO_Plugin::init()},
+	 * and returns the same instance on subsequent calls.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @return SWFO_Plugin The singleton plugin instance.
+	 */
+	static function boot() { 
+		if( !self::$inst ) { 
+			self::$inst = new self; 
+			self::$inst->init(); 
+		} 
+		return self::$inst; 
+	}
 
+	/**
+	 * Initialize the plugin by registering all WordPress hooks and filters.
+	 *
+	 * Responsibilities include:
+	 * - Adding contextual help tabs for the plugin screen.
+	 * - Showing core admin notices and ensuring default options exist.
+	 * - Establishing a Redis connection (if enabled).
+	 * - Registering the admin menu and admin-post handlers (API key/bypass CRUD).
+	 * - Enforcing REST gating for WooCommerce endpoints.
+	 * - Hardening checkout (honeypot, JS cookie, CAPTCHA) and performing success resets.
+	 * - Attempting safe insertion of recommended constants into wp-config.php.
+	 * - Adding the Settings link on the Plugins list row.
+	 * - Logging REST requests early for observability.
+	 * - Providing CSV export/clear actions for API hit logs.
+	 * - Enqueuing admin assets and exposing AJAX endpoints for live Events/API Hits.
+	 *
+	 * Hooks added:
+	 * - Actions: load-woocommerce_page_swfo, admin_notices, admin_init, admin_menu,
+	 *   admin_post_swfo_generate_key, admin_post_swfo_delete_key, admin_post_swfo_add_bypass,
+	 *   admin_post_swfo_delete_bypass, woocommerce_after_order_notes, woocommerce_checkout_process,
+	 *   wp_enqueue_scripts, woocommerce_thankyou, woocommerce_order_status_processing,
+	 *   woocommerce_order_status_completed, admin_enqueue_scripts, wp_ajax_swfo_get_events,
+	 *   wp_ajax_swfo_get_hits.
+	 * - Filters: rest_request_before_callbacks (gate), rest_request_before_callbacks (hit logger),
+	 *   plugin_action_links_{plugin_basename(__FILE__)}.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @return void
+	 */
 	function init(){
 		// Add contextual help tabs for this admin screen
 		add_action('load-woocommerce_page_swfo', [$this,'add_help_tabs']);
@@ -70,6 +210,8 @@ class SWFO_Plugin {
 		// Core hooks
 		add_action('admin_notices', [$this,'maybe_wc_notice']);
 		add_action('admin_init', [$this,'ensure_defaults']);
+		add_action( 'admin_init', [$this, 'add_privacy_policy_content']);
+
 		$this->setup_redis();
 
 		// Admin UI
@@ -92,9 +234,6 @@ class SWFO_Plugin {
 		add_action('woocommerce_order_status_processing', [$this,'success_reset_by_order_obj']);
 		add_action('woocommerce_order_status_completed', [$this,'success_reset_by_order_obj']);
 
-		// wp-config constants appender
-		add_action('admin_init', [$this,'maybe_write_wp_config_constants']);
-
 		// Settings link
 		add_filter('plugin_action_links_'.plugin_basename(__FILE__), [$this,'links']);
 
@@ -110,18 +249,64 @@ class SWFO_Plugin {
 		add_action( 'wp_ajax_swfo_get_events', [ $this, 'ajax_get_events' ] );
 		add_action( 'wp_ajax_swfo_get_hits',   [ $this, 'ajax_get_hits' ] );
 
+		add_action( 'plugins_loaded', [ $this, 'load_textdomain' ] );
+	}
+
+	function add_privacy_policy_content() {
+		if ( function_exists( 'wp_add_privacy_policy_content' ) ) {
+				$content = __( 'Stop WooCommerce Fake Orders may log REST API request metadata (IP address, user agent, request path, method, and masked parameters) for rate-limiting and security diagnostics. Logging can be disabled in the plugin settings. Data is stored transiently in the database or Redis and is pruned to the configured limits. If a webhook is configured, minimal event payloads are sent to that endpoint.', 'stop-woocommerce-fake-orders' );
+				wp_add_privacy_policy_content( __( 'Stop WooCommerce Fake Orders', 'stop-woocommerce-fake-orders' ), wp_kses_post( "<p>{$content}</p>" ) );
+		}
 	}
 
 	/**
-	 * Enqueue admin assets only on our screen and localize runtime data.
+	 * Initialize the Redis client if enabled and available.
+	 *
+	 * Checks if Redis usage is enabled via options or the SWFO_USE_REDIS constant,
+	 * verifies the `redis` PHP extension is loaded, and attempts to connect to the
+	 * configured Redis server. On success, assigns the connected client to
+	 * `$this->redis` and sets `$this->use_redis` to true. On failure, logs an error
+	 * message and leaves `$this->use_redis` false to fall back to transients.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @return void
+	 */
+	public function load_textdomain() {
+		load_plugin_textdomain( 'stop-woocommerce-fake-orders', false, dirname( plugin_basename( __FILE__ ) ) . '/languages' ); 
+	}
+
+	/**
+	 * Enqueue admin-side assets and bootstrap live (AJAX) polling for the plugin screen.
+	 *
+	 * Registers a lightweight inline script handle and localizes runtime data
+	 * (AJAX URL, nonce, polling interval, and strings), then injects the polling
+	 * module via {@see self::admin_polling_js()} for the "Recent Events" and
+	 * "API Hits" tabs. Runs only on the SWFO settings screen.
+	 *
+	 * Security:
+	 * - Nonce `swfo_admin` is provided for authenticated AJAX requests.
+	 *
+	 * @since 2.0.0
+	 *
+	 * @param string $hook Current admin page hook suffix.
+	 * @return void
 	 */
 	public function admin_enqueue_assets( $hook ) {
 		if ( 'woocommerce_page_swfo' !== $hook ) {
 			return;
 		}
 
+		wp_register_script(
+    	'swfo-chart',
+    	plugins_url( 'assets/js/chart.min.js', __FILE__ ),
+    	array(),
+    	'4.5.0',
+    	true
+		);
+
 		// Lightweight inline module (no external file to keep single-file plugin)
-		wp_register_script( 'swfo-admin', false, [ 'jquery' ], '2.1.0', true );
+		wp_register_script( 'swfo-admin', false, [ 'jquery', 'swfo-chart' ], '2.1.0', true );
 
 		wp_localize_script(
 			'swfo-admin',
@@ -284,7 +469,28 @@ class SWFO_Plugin {
 	}
 
 	/**
-	 * AJAX: Return recent events since a UNIX timestamp.
+	 * AJAX: Fetch "Recent Events" items for live admin updates.
+	 *
+	 * Expects authenticated requests from the SWFO settings screen and returns a JSON
+	 * payload containing recent log entries (optionally filtered by a UNIX timestamp).
+	 *
+	 * Request:
+	 * - Capability: Current user must have `manage_options`.
+	 * - Nonce: `swfo_admin` (sent as `_ajax_nonce`).
+	 * - Query param `since` (optional, int): If provided, only events with `t` > `since`
+	 *   are returned. Useful for incremental polling.
+	 *
+	 * Response (on success):
+	 * - `items` (array): Log entries, newest-first as stored, each with keys like `t`, `type`, `note`.
+	 * - `server_time` (int): Current server UNIX timestamp to be used as the next `since` cursor.
+	 *
+	 * HTTP Status:
+	 * - 403 on capability failure.
+	 * - 200 with `success: true` on success, `success: false` on nonce/capability failure.
+	 *
+	 * @since 2.0.0
+	 *
+	 * @return void Sends a JSON response and exits.
 	 */
 	public function ajax_get_events() {
 		if ( ! current_user_can( 'manage_options' ) ) {
@@ -316,7 +522,31 @@ class SWFO_Plugin {
 	}
 
 	/**
-	 * AJAX: Return API hits since a UNIX timestamp.
+	 * AJAX: Fetch "API Hits" (wp-json traffic) for live admin updates.
+	 *
+	 * Expects authenticated requests from the SWFO settings screen and returns a JSON
+	 * payload containing recent API-hit entries, optionally filtered by a UNIX
+	 * timestamp cursor.
+	 *
+	 * Request:
+	 * - Capability: Current user must have `manage_options`.
+	 * - Nonce: `swfo_admin` (sent as `_ajax_nonce`).
+	 * - Query param `since` (optional, int): If provided, only hits with `t` > `since`
+	 *   are returned. Use the returned `server_time` as the next cursor when polling.
+	 *
+	 * Response (on success):
+	 * - `items` (array): API-hit entries (newest first), each typically including:
+	 *   `t` (int, timestamp), `ip` (string), `m` (HTTP method), `path` (string),
+	 *   `route` (string), `ua` (string), and `data` (array|string; masked/truncated).
+	 * - `server_time` (int): Current server UNIX timestamp to use for subsequent polls.
+	 *
+	 * HTTP Status:
+	 * - 403 on capability failure.
+	 * - 200 with `success: true` on success (or `success: false` on nonce failure).
+	 *
+	 * @since 2.0.0
+	 *
+	 * @return void Sends a JSON response and exits.
 	 */
 	public function ajax_get_hits() {
 		if ( ! current_user_can( 'manage_options' ) ) {
@@ -348,8 +578,17 @@ class SWFO_Plugin {
 	}
 
 	/**
-	 * Add contextual Help Tabs to the Stop Fake Orders admin screen.
-	 * Explains impact of options without cluttering the form.
+	 * Register contextual Help Tabs for the SWFO settings screen.
+	 *
+	 * Adds multiple tabs (Overview, Rate Limiting, Edge Gate & Identity, Browser
+	 * Challenges, Allow/Deny Lists, Logs & Export) plus a tips sidebar to the
+	 * WooCommerce → Stop Fake Orders admin screen. Runs only when the current
+	 * screen is `woocommerce_page_swfo`.
+	 *
+	 * @since 1.9.0
+	 *
+	 * @global WP_Screen $current_screen Current admin screen object.
+	 * @return void
 	 */
 	public function add_help_tabs(){
 		$screen = get_current_screen();
@@ -357,7 +596,7 @@ class SWFO_Plugin {
 
 		$screen->add_help_tab([
 			'id'      => 'swfo_overview',
-			'title'   => __('Overview','default'),
+			'title'   => __('Overview','stop-woocommerce-fake-orders'),
 			'content' =>
 				'<p><strong>Stop WooCommerce Fake Orders</strong> adds edge gating, rate limiting, and checkout hardening to reduce spam/fraud orders while keeping real buyers unblocked.</p>'.
 				'<ul>'.
@@ -370,7 +609,7 @@ class SWFO_Plugin {
 
 		$screen->add_help_tab([
 			'id'    => 'swfo_limits',
-			'title' => __('Rate Limiting','default'),
+			'title' => __('Rate Limiting','stop-woocommerce-fake-orders'),
 			'content' =>
 				'<p><strong>Window (sec)</strong> defines the sliding window length. '.
 				'<strong>IP requests/window</strong> caps how many REST calls per IP. '.
@@ -380,7 +619,7 @@ class SWFO_Plugin {
 
 		$screen->add_help_tab([
 			'id'    => 'swfo_gates',
-			'title' => __('Edge Gate & Identity','default'),
+			'title' => __('Edge Gate & Identity','stop-woocommerce-fake-orders'),
 			'content' =>
 				'<p>Use <code>X-WC-API-Key</code> for server-to-server requests. Keys are stored hashed. '.
 				'Optional HMAC (<code>X-WC-HMAC</code>, <code>X-WC-Timestamp</code>) deters key replay within ±5 minutes. '.
@@ -389,7 +628,7 @@ class SWFO_Plugin {
 
 		$screen->add_help_tab([
 			'id'    => 'swfo_browser',
-			'title' => __('Browser Challenges','default'),
+			'title' => __('Browser Challenges','stop-woocommerce-fake-orders'),
 			'content' =>
 				'<p><strong>JS cookie</strong> verifies a real browser is present. <strong>Honeypot</strong> blocks naive bots. '.
 				'Enable <strong>CAPTCHA</strong> only after repeated soft blocks to minimize friction for legit buyers.</p>'
@@ -397,7 +636,7 @@ class SWFO_Plugin {
 
 		$screen->add_help_tab([
 			'id'    => 'swfo_lists',
-			'title' => __('Allow/Deny Lists','default'),
+			'title' => __('Allow/Deny Lists','stop-woocommerce-fake-orders'),
 			'content' =>
 				'<p><strong>Allowlist CIDRs</strong> fully bypass protections (trusted partners). '.
 				'<strong>Soft-deny CIDRs</strong> respond with HTTP 429 (not 403) to discourage probing. '.
@@ -406,7 +645,7 @@ class SWFO_Plugin {
 
 		$screen->add_help_tab([
 			'id'    => 'swfo_telemetry',
-			'title' => __('Logs & Export','default'),
+			'title' => __('Logs & Export','stop-woocommerce-fake-orders'),
 			'content' =>
 				'<p>Recent events are kept in memory/Redis (no DB bloat). '.
 				'Enable <strong>error_log</strong> export or set a <strong>Webhook URL</strong> to stream JSON events to your SIEM.</p>'
@@ -419,14 +658,34 @@ class SWFO_Plugin {
 		);
 	}
 
-	/** ===== WooCommerce presence (soft check) ===== */
+	/**
+	 * Output an admin notice if WooCommerce is not active.
+	 *
+	 * Displays a dismissible warning on admin screens (for users with the
+	 * `manage_options` capability) indicating that the plugin works best when
+	 * WooCommerce is active.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @return void
+	 */
 	function maybe_wc_notice(){
 		if( is_admin() && current_user_can('manage_options') && !class_exists('WooCommerce') ){
 			echo '<div class="notice notice-warning"><p><strong>Stop WooCommerce Fake Orders</strong> works best with WooCommerce active.</p></div>';
 		}
 	}
 
-	/** ===== Defaults ===== */
+	/**
+	 * Ensure plugin options are initialized with default values.
+	 *
+	 * On first run (when the `configured` flag is absent), iterates through the
+	 * `$this->defaults` map and seeds any missing options using `update_option()`.
+	 * Finally sets the `configured` flag so this initialization runs only once.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @return void
+	 */
 	function ensure_defaults(){
 		if(!get_option(SWFO_Opt::k('configured'))){
 			foreach($this->defaults as $k=>$v) if(false===get_option(SWFO_Opt::k($k))) update_option(SWFO_Opt::k($k), $v);
@@ -434,7 +693,25 @@ class SWFO_Plugin {
 		}
 	}
 
-	/** ===== Redis ===== */
+	/**
+	 * Initialize the Redis client (phpredis) if enabled and available.
+	 *
+	 * Determines whether Redis should be used from plugin options or constants,
+	 * validates the `redis` PHP extension, and attempts to connect using the
+	 * configured host/port with an optional AUTH and DB selection. On success,
+	 * assigns the connected client to `$this->redis` and flips `$this->use_redis`
+	 * to true. On any failure, logs a concise error via `error_log()` and keeps
+	 * transient fallback by leaving `$this->use_redis` false.
+	 *
+	 * Notes:
+	 * - Honors `SWFO_USE_REDIS`, `SWFO_REDIS_AUTH`, and `SWFO_REDIS_DB` constants
+	 *   (preferred for secrets) while still allowing settings from the options UI.
+	 * - Uses a short connection timeout and verifies connectivity with `PING`.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @return void
+	 */
 	function setup_redis(){
 		$this->redis = null;
 		$this->use_redis = false;
@@ -469,14 +746,41 @@ class SWFO_Plugin {
 		}
 	}
 
-	/** ===== Admin ===== */
+	/**
+	 * Register the plugin’s admin submenu under the WooCommerce menu.
+	 *
+	 * Adds a "Stop Fake Orders" submenu page (slug: `swfo`) that is visible to
+	 * users with the `manage_options` capability and renders the main settings
+	 * screen via {@see self::admin_page()}.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @return void
+	 */
 	function menu(){
 		add_submenu_page('woocommerce','Stop Fake Orders','Stop Fake Orders','manage_options','swfo',[$this,'admin_page']);
 	}
 
 	/**
-	 * Admin page with native WP tabs (no reload). Hash-based routing preserves active tab on refresh.
-	 * All settings live in a single <form>; switching tabs is JS-only.
+	 * Render the plugin’s main admin screen and handle settings saves.
+	 *
+	 * Outputs the single-page settings UI under WooCommerce → Stop Fake Orders,
+	 * including tabbed sections (Status, Rate Limits, Edge Gate & Identity,
+	 * Allow/Deny, Browser Challenges, Redis, Logs & Export, Recent Events,
+	 * API Hits, Store API). When the settings form is submitted, verifies the
+	 * nonce, persists options via {@see self::save_settings()}, reinitializes
+	 * Redis via {@see self::setup_redis()}, and redirects back to the active tab
+	 * using {@see self::tab_url()} to avoid resubmission.
+	 *
+	 * The screen also renders summary charts, filtered/paginated “Recent Events”
+	 * and “API Hits” tables (with masked sensitive fields), and action buttons
+	 * for exporting and clearing API hits.
+	 *
+	 * Capability required: `manage_options`.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @return void
 	 */
 	function admin_page(){
 		if(!current_user_can('manage_options')) return;
@@ -1100,8 +1404,43 @@ class SWFO_Plugin {
 		<?php
 	}
 
-	/** ===== Save settings ===== */
-
+	/**
+	 * Persist plugin settings from the admin form submission.
+	 *
+	 * Verifies and sanitizes incoming `$_POST` values, then updates the
+	 * corresponding options namespaced with {@see SWFO_Opt::k()}. Numeric fields
+	 * are cast to integers; other scalar fields are sanitized with
+	 * {@see sanitize_text_field()}, and the webhook URL is sanitized with
+	 * {@see esc_url_raw()}.
+	 *
+	 * Booleans are stored based on the presence of their checkbox fields:
+	 * - enable_js_challenge
+	 * - enable_honeypot
+	 * - enable_hmac
+	 * - use_redis
+	 * - log_to_error_log
+	 * - captcha_enabled
+	 * - enable_api_hit_logging
+	 *
+	 * Special handling:
+	 * - `api_hits_max` is clamped to a minimum of 100.
+	 * - `store_api_rate_limit` is clamped to a minimum of 10.
+	 * - `store_api_mode` must be one of: `open`, `same-origin`, `js-cookie`, `api-key`.
+	 * - `allowlist_cidrs`, `ua_denylist`, and `soft_deny_cidrs` are parsed from
+	 *   newline-delimited text into trimmed arrays (empty lines removed).
+	 * - Redis credentials respect constants when defined:
+	 *     - `SWFO_REDIS_AUTH`: if defined, the option is not changed; otherwise,
+	 *       the posted `redis_auth` is saved unless it equals the mask `********`.
+	 *     - `SWFO_REDIS_DB`: if defined, the option is not changed; otherwise,
+	 *       the posted `redis_db` is saved with a minimum of 0.
+	 *
+	 * This method does not perform nonce or capability checks; callers (e.g.
+	 * {@see self::admin_page()}) are responsible for verifying the request
+	 * authenticity and user capabilities before invoking it.
+	 *
+	 * @since 1.0.0
+	 * @return void
+	 */
 	function save_settings(){
 		$fields = [
 			'window_seconds','ip_rate_limit','email_rate_limit','required_cookie','hmac_secret','redis_host','redis_port','logs_max','webhook_url','captcha_after_soft_blocks'
@@ -1150,6 +1489,28 @@ class SWFO_Plugin {
 		}
 	}
 
+	/**
+	 * Generate and store a new API key, then redirect back to the settings page.
+	 *
+	 * Capability: requires the current user to have the `manage_options` capability.
+	 * A 48-character hex token is generated using {@see random_bytes()}, stored
+	 * only briefly in a transient (`swfo_last_key`) so it can be shown once in the
+	 * UI, while a bcrypt hash of the key is persisted in the `api_keys` option
+	 * (namespaced via {@see SWFO_Opt::k()}).
+	 *
+	 * Side effects:
+	 * - Updates the `swfo_api_keys` option with a new entry keyed by a time-based ID.
+	 * - Sets a transient `swfo_last_key` (TTL ~20s) containing the plaintext key for
+	 *   one-time display in the admin screen.
+	 * - Performs a safe redirect back to the plugin admin page and terminates execution.
+	 *
+	 * Security notes:
+	 * - Plaintext keys are never stored in the database; only their hashes are.
+	 * - The transient holds the plaintext key briefly for display and then expires.
+	 *
+	 * @since 1.0.0
+	 * @return void
+	 */
 	function handle_generate_key(){
 		if(!current_user_can('manage_options')) wp_die('Forbidden');
 		$key = bin2hex(random_bytes(24));
@@ -1160,6 +1521,27 @@ class SWFO_Plugin {
 		set_transient('swfo_last_key',$key,20);
 		wp_redirect(admin_url('admin.php?page=swfo')); exit;
 	}
+
+	/**
+	 * Delete a stored API key by ID and redirect back to the settings screen.
+	 *
+	 * Requires the current user to have the `manage_options` capability and a valid
+	 * nonce (`swfo_del_key`) passed via the `_wpnonce` query arg. The key identifier
+	 * is read from the `id` query arg, sanitized, and—if present in the stored
+	 * `api_keys` option (namespaced via {@see SWFO_Opt::k()})—removed before the
+	 * option is updated.
+	 *
+	 * Side effects:
+	 * - Updates the `swfo_api_keys` option to remove the specified key.
+	 * - Performs a redirect to the plugin admin page and exits.
+	 *
+	 * Security:
+	 * - Verifies capability and nonce before mutating options.
+	 * - Sanitizes all incoming query parameters.
+	 *
+	 * @since 1.0.0
+	 * @return void
+	 */
 	function handle_delete_key(){
 		if(!current_user_can('manage_options') || !wp_verify_nonce($_GET['_wpnonce']??'','swfo_del_key')) wp_die('Forbidden');
 		$id=sanitize_text_field($_GET['id']??'');
@@ -1167,6 +1549,33 @@ class SWFO_Plugin {
 		if(isset($keys[$id])){ unset($keys[$id]); update_option(SWFO_Opt::k('api_keys'),$keys); }
 		wp_redirect(admin_url('admin.php?page=swfo')); exit;
 	}
+
+	/**
+	 * Create (or overwrite) a named bypass token and redirect to the settings page.
+	 *
+	 * Expects a valid nonce for the action `swfo_add_bypass` and the current user to
+	 * have the `manage_options` capability. The bypass entry is stored in the
+	 * `bypass_tokens` option (namespaced via {@see SWFO_Opt::k()}).
+	 *
+	 * Input (POST):
+	 * - `bp_name`  (string) Human-readable identifier for the token. Sanitized via
+	 *               `sanitize_text_field()`. Defaults to `bp_{timestamp}` when empty.
+	 * - `bp_token` (string) Raw token to store. Trimmed; if omitted or empty, a
+	 *               random 32-hex-char token is generated (`random_bytes(16)`).
+	 *
+	 * Behavior:
+	 * - Loads the current bypass token map, inserts/overwrites the `[name] => token`
+	 *   pair, and updates the option.
+	 * - Redirects back to the plugin admin page and terminates execution.
+	 *
+	 * Security:
+	 * - Verifies capability and nonce before mutating options.
+	 * - Sanitizes all user-supplied fields.
+	 * - Token generation uses cryptographically secure randomness.
+	 *
+	 * @since 1.0.0
+	 * @return void
+	 */
 	function handle_add_bypass(){
 		if ( ! current_user_can('manage_options') || ! check_admin_referer('swfo_add_bypass') ) wp_die('Forbidden');
 		$name = sanitize_text_field($_POST['bp_name']??'bp_'.time());
@@ -1177,6 +1586,34 @@ class SWFO_Plugin {
 		update_option(SWFO_Opt::k('bypass_tokens'),$bp);
 		wp_redirect(admin_url('admin.php?page=swfo')); exit;
 	}
+
+	/**
+	 * Delete a named bypass token and redirect back to the settings screen.
+	 *
+	 * Requires the current user to have the `manage_options` capability and a valid
+	 * nonce for the action `swfo_del_bp`. If the provided name exists in the
+	 * `bypass_tokens` option (namespaced via {@see SWFO_Opt::k()}), the entry is
+	 * removed and the option is updated.
+	 *
+	 * Input (GET):
+	 * - `_wpnonce` (string) Security nonce for `swfo_del_bp`. Verified via
+	 *   `wp_verify_nonce()`.
+	 * - `name`     (string) The bypass token key to remove. Sanitized with
+	 *   `sanitize_text_field()`.
+	 *
+	 * Behavior:
+	 * - Validates capability and nonce.
+	 * - Loads the bypass token map; if the key exists, unsets it and updates the option.
+	 * - Redirects to the plugin admin page (`admin.php?page=swfo`) and terminates execution.
+	 *
+	 * Security:
+	 * - Capability check prevents unauthorized access.
+	 * - Nonce verification protects against CSRF.
+	 * - User-provided input is sanitized before use.
+	 *
+	 * @since 1.0.0
+	 * @return void
+	 */	
 	function handle_delete_bypass(){
 		if(!current_user_can('manage_options') || !wp_verify_nonce($_GET['_wpnonce']??'','swfo_del_bp')) wp_die('Forbidden');
 		$name=sanitize_text_field($_GET['name']??'');
@@ -1185,33 +1622,89 @@ class SWFO_Plugin {
 		wp_redirect(admin_url('admin.php?page=swfo')); exit;
 	}
 
-	/** Return site host for same-origin checks */
+	/**
+	 * Retrieve the current site's host (lowercased) for same-origin checks.
+	 *
+	 * Uses {@see home_url()} to obtain the site's URL and parses it with
+	 * {@see parse_url()} to extract the `host` component. The returned value is
+	 * normalized to lowercase. If the host cannot be determined, an empty string
+	 * is returned.
+	 *
+	 * Note: The scheme and port are not included—only the hostname/FQDN.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @return string The site host in lowercase, or an empty string if unavailable.
+	 */
 	private function site_host(){
 		$u = home_url('/');
 		$p = parse_url($u);
 		return isset($p['host']) ? strtolower($p['host']) : '';
 	}
 
-	/** Check if request Origin/Referer matches site host */
+	/**
+	 * Determine whether the incoming request is same-origin as the site.
+	 *
+	 * This method compares the hostname from the incoming request's
+	 * `Origin` (preferred) or `Referer` header with the site's host
+	 * (as returned by {@see self::site_host()}).
+	 *
+	 * Behavior:
+	 * - If the site host cannot be determined, returns false.
+	 * - If neither `Origin` nor `Referer` is present, returns false.
+	 * - Parses the header URL and compares the lowercased host components.
+	 *
+	 * Security notes:
+	 * - Only the hostname is compared; scheme and port are ignored.
+	 * - Malformed header values are handled defensively and treated as non-matching.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param WP_REST_Request $request The current REST request (not used directly; present for signature parity).
+	 * @return bool True if the request appears to be same-origin, false otherwise.
+	 */
 	private function is_same_origin($request){
 		$site = $this->site_host();
 		if(!$site) return false;
 		$hdr = $_SERVER['HTTP_ORIGIN'] ?? ($_SERVER['HTTP_REFERER'] ?? '');
 		if(!$hdr) return false;  // block when no Origin/Referer is sent
-		$p = @parse_url($hdr);
+		$p = parse_url($hdr);
 		$h = isset($p['host']) ? strtolower($p['host']) : '';
 		return $h === $site;
 	}
 
-	/** ===== REST Gate ===== */
 	/**
-	 * REST abuse gate.
-	 * Filter signature: ($response, $handler, WP_REST_Request $request)
+	 * REST abuse gate and WooCommerce route hardening.
 	 *
-	 * @param WP_REST_Response|WP_Error|null $result
-	 * @param array                          $handler
-	 * @param WP_REST_Request                $request
-	 * @return WP_REST_Response|WP_Error|null
+	 * Runs early in the REST request lifecycle (via the
+	 * `rest_request_before_callbacks` filter) to enforce multiple layers of
+	 * protection specifically for WooCommerce REST and Store API routes:
+	 *
+	 * - Hard bans: immediate 403 for banned IPs.
+	 * - Per-route exemptions via `swfo_route_is_exempt` filter.
+	 * - Store API modes: same-origin, JS-cookie, or API-key (with optional HMAC).
+	 * - Store API rate limits: GET and optional write limits for cart/checkout.
+	 * - Header bypass for trusted S2S jobs (`X-SWFO-Bypass`).
+	 * - CIDR allowlist (full bypass) and soft-deny (429) networks.
+	 * - UA denylist and basic Origin/Referer sanity checks.
+	 * - Optional API key + HMAC verification for S2S integrations.
+	 * - Sliding-window IP rate limit for WooCommerce REST traffic.
+	 * - Checkout/order POST protections: honeypot, JS cookie, email rate limit,
+	 *   and optional math CAPTCHA.
+	 *
+	 * This callback MUST return the original result when the request is allowed,
+	 * or a `WP_Error` to short-circuit with an appropriate status code.
+	 *
+	 * @since 1.0.0
+	 * @since 2.1.0 Added hard IP ban enforcement, Store API write-rate limiting,
+	 *              and refined Store API gating modes.
+	 *
+	 * @hook rest_request_before_callbacks
+	 *
+	 * @param WP_REST_Response|WP_Error|null $result  Preemptive response, if any, from earlier filters.
+	 * @param array                          $handler Route handler details (unused here but required by the filter signature).
+	 * @param WP_REST_Request                $request The current REST request.
+	 * @return WP_REST_Response|WP_Error|null Unchanged result to continue processing, or a WP_Error to block the request.
 	 */
 	public function rest_gate( $result, $handler, $request ) {
 		// Ensure we actually got a WP_REST_Request
@@ -1426,8 +1919,38 @@ class SWFO_Plugin {
 		return $result;
 	}
 
+	/**
+	 * Build a normalized ban bucket key for Redis/transient storage.
+	 *
+	 * Normalizes the provided value by lowercasing and trimming it, then hashes it
+	 * (MD5) to form a compact, uniform key under the "ban:{type}:" namespace.
+	 * Useful for IP/email (or other identifier) hard-ban lookups.
+	 *
+	 * Example result: "ban:ip:7c4ff521986b4ff8d29440beec01972d"
+	 *
+	 * @since 2.1.0
+	 *
+	 * @param string $type Ban category (e.g. 'ip', 'email', 'ua').
+	 * @param string $val  Raw identifier value to normalize and hash.
+	 * @return string      Storage key string for this ban bucket.
+	 */
 	private function ban_key($type, $val){ return "ban:{$type}:".md5(strtolower(trim($val))); }
 
+	/**
+	 * Hard-ban an IP for a fixed TTL using Redis or transients.
+	 *
+	 * Stores a ban flag under a normalized bucket key (via {@see self::ban_key()}):
+	 * - If Redis is available/enabled, uses SETEX on "swfo:{key}".
+	 * - Otherwise falls back to a WordPress transient "swfo_{key}".
+	 *
+	 * Also emits an operational log entry "ban_ip_set" with the IP and TTL.
+	 *
+	 * @since 2.1.0
+	 *
+	 * @param string $ip          The client IP address to ban.
+	 * @param int    $ttl_seconds Time-to-live in seconds for the ban (default 3600s).
+	 * @return void
+	 */
 	public function ban_ip($ip, $ttl_seconds = 3600){
 		$key = $this->ban_key('ip',$ip);
 		if ($this->use_redis && $this->redis){
@@ -1438,6 +1961,18 @@ class SWFO_Plugin {
 		$this->log('ban_ip_set', "ip=$ip ttl=$ttl_seconds");
 	}
 
+	/**
+	 * Check if an IP address is currently hard-banned.
+	 *
+	 * Uses the normalized ban bucket key produced by {@see self::ban_key()}:
+	 * - If Redis is enabled and connected, checks existence of "swfo:{key}".
+	 * - Otherwise, checks the WordPress transient "swfo_{key}".
+	 *
+	 * @since 2.1.0
+	 *
+	 * @param string $ip The client IP address to test.
+	 * @return bool True if the IP is banned; false otherwise.
+	 */
 	public function is_banned_ip($ip){
 		$key = $this->ban_key('ip',$ip);
 		if ($this->use_redis && $this->redis){
@@ -1446,6 +1981,22 @@ class SWFO_Plugin {
 		return (bool) get_transient('swfo_'.$key);
 	}
 
+	/**
+	 * Hard-ban an email address for a fixed duration.
+	 *
+	 * Generates a normalized ban bucket key via {@see self::ban_key()} and stores a
+	 * marker value for the specified TTL:
+	 * - If Redis is enabled and available, uses SETEX on "swfo:{key}".
+	 * - Otherwise, falls back to a WordPress transient "swfo_{key}".
+	 *
+	 * A corresponding event is logged with type "ban_email_set".
+	 *
+	 * @since 2.1.0
+	 *
+	 * @param string $email        The email address to ban (will be normalized).
+	 * @param int    $ttl_seconds  Time-to-live in seconds for the ban. Default 3600.
+	 * @return void
+	 */
 	public function ban_email($email, $ttl_seconds = 3600){
 		$key = $this->ban_key('email',$email);
 		if ($this->use_redis && $this->redis){
@@ -1456,6 +2007,19 @@ class SWFO_Plugin {
 		$this->log('ban_email_set', "email=$email ttl=$ttl_seconds");
 	}
 
+	/**
+	 * Check if an email address is currently hard-banned.
+	 *
+	 * Resolves a normalized ban bucket key via {@see self::ban_key()} and tests for
+	 * the presence of the ban marker:
+	 * - When Redis is enabled and available, checks existence of "swfo:{key}".
+	 * - Otherwise, checks the WordPress transient "swfo_{key}".
+	 *
+	 * @since 2.1.0
+	 *
+	 * @param string $email Email address to test (will be normalized).
+	 * @return bool True if the email is banned; false otherwise.
+	 */
 	public function is_banned_email($email){
 		$key = $this->ban_key('email',$email);
 		if ($this->use_redis && $this->redis){
@@ -1464,7 +2028,21 @@ class SWFO_Plugin {
 		return (bool) get_transient('swfo_'.$key);
 	}
 
-	/** ===== Checkout Harden (forms) ===== */
+	/**
+	 * Output checkout form hardening fields (honeypot and math CAPTCHA).
+	 *
+	 * When enabled via plugin options, prints:
+	 * - A hidden honeypot input (`swfo_hp`) used to trap naive bots.
+	 * - A lightweight, stateless math CAPTCHA (operands, operator, and a nonce)
+	 *   that is later verified server-side.
+	 *
+	 * Escapes dynamic values and avoids introducing additional scripts/styles;
+	 * intended for use inside WooCommerce checkout form markup.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @return void
+	 */
 	function checkout_fields(){
 		if(get_option(SWFO_Opt::k('enable_honeypot'),true)){
 			echo '<p style="display:none"><label>Leave empty<input type="text" name="swfo_hp" value=""></label></p>';
@@ -1482,7 +2060,28 @@ class SWFO_Plugin {
 				'</p>';
 		}
 	}
-	function enqueue_js(){
+
+	/**
+	 * Enqueue inline JavaScript for checkout challenges.
+	 *
+	 * - Injects the JS cookie challenge script to set the verification cookie when
+	 *   the checkout page is viewed (if enabled).
+	 * - Adds an inline validator for the math CAPTCHA that prevents form submission
+	 *   when the client-side answer does not match the expected result.
+	 *
+	 * Scripts are added as inline code to `jquery-core` to keep the plugin single-file.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @return void
+	 */
+	function enqueue_js() {
+		
+		wp_localize_script( 'jquery-core', 'SWFOi18n', array(
+    	'captchaPrompt' => __( 'Please solve the anti-bot check correctly.', 'stop-woocommerce-fake-orders' ),
+    	'jsRequired'    => __( 'Please enable JavaScript to continue.', 'stop-woocommerce-fake-orders' ),
+		) );
+
 		if(is_checkout() && get_option(SWFO_Opt::k('enable_js_challenge'),true)){
 			wp_add_inline_script('jquery-core', $this->js_challenge());
 		}
@@ -1510,6 +2109,22 @@ class SWFO_Plugin {
 				})();");
 		}
 	}
+
+	/**
+	 * Validate checkout submission against anti-bot checks and rate limits.
+	 *
+	 * Performs multiple protections:
+	 * - Honeypot: blocks when the hidden field is filled.
+	 * - JS cookie: requires the verification cookie to be present.
+	 * - Email rate limit: throttles attempts per email within the configured window.
+	 * - CAPTCHA: verifies the stateless math challenge server-side.
+	 *
+	 * Adds WooCommerce notices on failure and logs relevant events for observability.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @return void
+	 */
 	function checkout_validate(){
 		$ip=$this->client_ip();
 		if(get_option(SWFO_Opt::k('enable_honeypot'),true) && !empty($_POST['swfo_hp'])){
@@ -1540,14 +2155,57 @@ class SWFO_Plugin {
 		}
 	}
 
-	/** Success resets: clear IP/email counters on legit success */
+	/**
+	 * Reset counters after a successful checkout using the order ID.
+	 *
+	 * Fetches the order object and, if found, delegates to {@see success_reset()}
+	 * to clear IP/email rate-limit buckets associated with the buyer. This reduces
+	 * friction for legitimate customers after payment/placement succeeds.
+	 *
+	 * Typically hooked to `woocommerce_thankyou`.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param int $order_id WooCommerce order ID.
+	 * @return void
+	 */
 	function success_reset_by_order_id($order_id){
 		if(!$order_id) return;
 		$order = wc_get_order($order_id); if($order) $this->success_reset($order);
 	}
+
+	/**
+	 * Reset counters after an order status transition using the order ID.
+	 *
+	 * Fetches the order object for transitions such as "processing" or "completed"
+	 * and, if found, delegates to {@see success_reset()} to clear IP/email
+	 * rate-limit buckets associated with the buyer.
+	 *
+	 * Typically hooked to `woocommerce_order_status_processing` and
+	 * `woocommerce_order_status_completed`.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param int $order_id WooCommerce order ID.
+	 * @return void
+	 */
 	function success_reset_by_order_obj($order_id){
 		$order = wc_get_order($order_id); if($order) $this->success_reset($order);
 	}
+
+	/**
+	 * Clear buyer-related rate-limit buckets and log the reset.
+	 *
+	 * Derives buyer identity (billing email and customer IP) from the order object
+	 * and clears corresponding counters (e.g. `email:{email}`, `ip:{ip}`) so that
+	 * legitimate customers are not throttled after a successful order event.
+	 * Emits a `success_reset` log entry with masked context for observability.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param \WC_Order $order The WooCommerce order object.
+	 * @return void
+	 */
 	private function success_reset($order){
 		$email = strtolower($order->get_billing_email());
 		$ip = $this->client_ip_from_order($order);
@@ -1556,7 +2214,20 @@ class SWFO_Plugin {
 		$this->log('success_reset','email:'.$email.' ip:'.$ip);
 	}
 
-	/** ===== Helpers: keys, bypass, hmac ===== */
+	/**
+	 * Determine whether the current REST request should be trusted as an admin request.
+	 *
+	 * Considers two paths:
+	 * 1) A logged-in user with `manage_woocommerce` or `manage_options` capability.
+	 * 2) A valid REST nonce (`X-WP-Nonce`) verified against the `wp_rest` action.
+	 *
+	 * When true, the plugin skips certain REST gates intended only for public traffic.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param \WP_REST_Request|mixed $request REST request object (or mixed if unavailable).
+	 * @return bool True if the request is trusted/admin-originated, false otherwise.
+	 */
 	private function is_trusted_admin_request( $request ){
 		if ( function_exists('is_user_logged_in') && is_user_logged_in() ) {
 			if ( current_user_can('manage_woocommerce') || current_user_can('manage_options') ) {
@@ -1570,18 +2241,69 @@ class SWFO_Plugin {
 		}
 		return false;
 	}
+
+	/**
+	 * Validate an API key sent by a client.
+	 *
+	 * Compares the provided API key against the stored set of hashed keys using
+	 * `password_verify()`. Keys are stored in the `swfo_api_keys` option as
+	 * an associative array of `id => password_hash(key)`.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param string $key The plaintext API key supplied by the client.
+	 * @return bool True if the key matches any stored hash, false otherwise.
+	 */
 	private function api_ok($key){
 		foreach((array)get_option(SWFO_Opt::k('api_keys'),[]) as $id=>$hash){
 			if(password_verify($key,$hash)) return true;
 		}
 		return false;
 	}
+
+	/**
+	 * Validate a bypass token for trusted server-to-server jobs.
+	 *
+	 * Compares the provided token against the configured bypass tokens using
+	 * `hash_equals()` to mitigate timing attacks. Tokens are stored in the
+	 * `swfo_bypass_tokens` option as `name => token`.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param string $token The plaintext bypass token from the `X-SWFO-Bypass` header.
+	 * @return bool True if the token matches a stored value, false otherwise.
+	 */
 	private function bypass_ok($token){
 		foreach((array)get_option(SWFO_Opt::k('bypass_tokens'),[]) as $n=>$t){
 			if(hash_equals($t,$token)) return true;
 		}
 		return false;
 	}
+
+	/**
+	 * Verify the HMAC signature for a request.
+	 *
+	 * Expects headers `X-WC-HMAC` and `X-WC-Timestamp`. Rejects if the shared
+	 * secret is empty, headers are missing, or the timestamp is older/newer than
+	 * ±5 minutes. The signing string is:
+	 *
+	 *     METHOD|ROUTE|BODY|TIMESTAMP
+	 *
+	 * Where:
+	 * - METHOD is the HTTP verb from the request (e.g., GET/POST).
+	 * - ROUTE is the REST route (e.g., `/wc/v3/orders`).
+	 * - BODY is the raw request body.
+	 * - TIMESTAMP is the integer seconds since epoch from the header.
+	 *
+	 * The HMAC is computed as `hash_hmac('sha256', $string, $secret)`.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param \WP_REST_Request $req The REST request object.
+	 * @param string           $h   The hex-encoded HMAC from `X-WC-HMAC`.
+	 * @param string|int       $ts  The timestamp from `X-WC-Timestamp`.
+	 * @return bool True if the signature is valid within the allowed skew, false otherwise.
+	 */
 	private function hmac_ok($req,$h,$ts){
 		$sec=get_option(SWFO_Opt::k('hmac_secret'),''); if(!$sec||!$h||!$ts) return false;
 		if(abs(time()-intval($ts))>300) return false;
@@ -1590,7 +2312,20 @@ class SWFO_Plugin {
 		return hash_equals($calc,$h);
 	}
 
-	/** ===== Counters (Redis or transients) ===== */
+	/**
+	 * Increment a sliding-window counter with TTL using Redis or transients.
+	 *
+	 * When Redis is available, uses atomic `INCR` and sets/refreshes the key's TTL.
+	 * On Redis failure (caught Throwable), falls back to a WordPress transient that
+	 * stores a small payload `['t' => timestamp, 'c' => count]` and expires after
+	 * `$ttl + 5` seconds to provide a slight grace period.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param string $key Counter bucket name (without the `swfo:` prefix).
+	 * @param int    $ttl Time-to-live in seconds for the counter window.
+	 * @return int   The incremented counter value.
+	 */
 	private function incr($key,$ttl){
 		if($this->use_redis && $this->redis){
 			try{
@@ -1610,6 +2345,17 @@ class SWFO_Plugin {
 		return (int)$e['c'];
 	}
 
+	/**
+	 * Reset (delete) a counter key from Redis or transients.
+	 *
+	 * Attempts to delete the Redis key first; on failure or when Redis is not in
+	 * use, deletes the corresponding transient.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param string $key Counter bucket name (without the `swfo:` prefix).
+	 * @return void
+	 */
 	private function reset($key){
 		if($this->use_redis && $this->redis){
 			try{ $this->redis->del('swfo:'.$key); return; }
@@ -1618,6 +2364,18 @@ class SWFO_Plugin {
 		delete_transient('swfo_cnt_'.md5($key));
 	}
 
+	/**
+	 * Peek (read) the current value of a counter without incrementing it.
+	 *
+	 * When Redis is in use, fetches the value of the key; otherwise, reads the
+	 * corresponding transient and extracts the count. Returns zero if the key
+	 * does not exist or on any error.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param string $key Counter bucket name (without the `swfo:` prefix).
+	 * @return int   The current counter value, or zero if not found.
+	 */
 	private function peek($key){
 		if($this->use_redis && $this->redis){
 			try{
@@ -1632,21 +2390,49 @@ class SWFO_Plugin {
 		return is_array($e)?intval($e['c']):0;
 	}
 
+	/**
+	 * Record a soft-block event for an IP address.
+	 *
+	 * Increments a longer-lived "soft:<ip>" bucket to track repeated soft failures
+	 * (e.g., UA deny, missing cookie, bad HMAC). The window length is derived from
+	 * the configured `window_seconds` option and multiplied by 10 to retain history
+	 * longer than the main rate window. Also writes an event log entry.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param string $bucket Short label of the failing mechanism (e.g., 'ua', 'api', 'hmac').
+	 * @param string $ip     Client IP address.
+	 * @return void
+	 */
 	private function touch_fail($bucket,$ip){
 		$win=intval(get_option(SWFO_Opt::k('window_seconds'),60));
 		$c=$this->incr('soft:'.$ip,$win*10); // soft block counter lasts longer
 		$this->log('soft_block',"$bucket ip=$ip c=$c");
 	}
 
-	/** ===== Logs (lightweight + export) ===== */
-
+	/**
+	 * Retrieve recent plugin event logs from Redis (preferred) or transients.
+	 *
+	 * When Redis is enabled and reachable, uses a Redis list at `swfo:logs`, where each
+	 * item is a serialized associative array with at least `t` (timestamp) and `type`.
+	 * Falls back to a WordPress transient keyed by {@see SWFO_Opt::k()} when Redis is
+	 * unavailable. Always returns a PHP array of log rows, newest-first, or an empty
+	 * array if no logs are present.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @return array[] Array of log entries. Each entry is an associative array with keys:
+	 *                 - 't'   (int)    Unix timestamp.
+	 *                 - 'type'(string) Event type identifier.
+	 *                 - 'note'(string) Optional note/metadata.
+	 */
 	private function logs_get(){
 		if($this->use_redis && $this->redis){
 			try{
 				$raw=$this->redis->lRange('swfo:logs',0,-1);
 				if(!is_array($raw)) $raw=[];
 				$o=[];
-				foreach($raw as $r){ $dec=@unserialize($r); if(is_array($dec)&&isset($dec['t'],$dec['type'])) $o[]=$dec; }
+				foreach($raw as $r){ $dec=unserialize($r); if(is_array($dec)&&isset($dec['t'],$dec['type'])) $o[]=$dec; }
 				return $o;
 			}catch(\Throwable $e){
 				error_log('SWFO Redis logs_get fallback: '.$e->getMessage());
@@ -1657,6 +2443,19 @@ class SWFO_Plugin {
 		return is_array($l)?$l:[];
 	}
 	
+	/**
+	 * Persist recent plugin event logs to Redis or transients.
+	 *
+	 * Normalizes the input to an array, trims the list to the configured maximum
+	 * (option `logs_max`, minimum 10), then writes the list. Uses a Redis list
+	 * `swfo:logs` when available, otherwise stores the whole array in a transient.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param array $logs Ordered list of log rows (newest first). Each row should be an
+	 *                    associative array containing at least 't' (int) and 'type' (string).
+	 * @return void
+	 */
 	private function logs_set($logs){
 		$logs = is_array($logs) ? $logs : [];
 		$max  = intval(get_option(SWFO_Opt::k('logs_max'),300));
@@ -1674,33 +2473,96 @@ class SWFO_Plugin {
 		set_transient(SWFO_Opt::k('logs'),$logs,HOUR_IN_SECONDS);
 	}
 
+	/**
+	 * Append a single event row to the logs and optionally export it.
+	 *
+	 * Prepends a new log entry (timestamp, type, note), persists via {@see logs_set()},
+	 * and, if enabled, mirrors to the PHP error log (option `log_to_error_log`) and/or
+	 * POSTs a JSON payload to the configured webhook URL (option `webhook_url`).
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param string $type Short machine-readable event type (e.g., 'rate_ip', 'soft_deny').
+	 * @param string $note Optional human-readable note or compact metadata.
+	 * @return void
+	 */
 	private function log($type,$note=''){
 		$l=$this->logs_get(); array_unshift($l,['t'=>time(),'type'=>$type,'note'=>$note]); $this->logs_set($l);
 		if(get_option(SWFO_Opt::k('log_to_error_log'),false)) error_log("[SWFO] $type - $note");
 		if($u=get_option(SWFO_Opt::k('webhook_url'),'')) $this->post_webhook($u, ['t'=>time(),'type'=>$type,'note'=>$note]);
 	}
+
+	/**
+	 * POST a JSON payload to a webhook URL (non-blocking).
+	 * 
+	 * @since 1.0.0
+	 * @param string $url     The webhook URL.
+	 * @param array  $payload Associative array to JSON-encode and send.
+	 * @return void
+	 */
 	private function post_webhook($url,$payload){ wp_remote_post($url,['timeout'=>2,'blocking'=>false,'headers'=>['Content-Type'=>'application/json'],'body'=>wp_json_encode($payload)]); }
 
-	/** ===== Utils ===== */
+	/**
+	 * Get the client's IP address, accounting for proxies.
+	 * 
+	 * @since 1.0.0
+	 * @return string The client's IP address.
+	 */
 	private function client_ip(){
 		if(!empty($_SERVER['HTTP_CF_CONNECTING_IP'])) return $_SERVER['HTTP_CF_CONNECTING_IP']; // CF
 		if(!empty($_SERVER['HTTP_X_FORWARDED_FOR'])){ $p=explode(',',$_SERVER['HTTP_X_FORWARDED_FOR']); return trim($p[0]); }
 		return $_SERVER['REMOTE_ADDR'] ?? '0.0.0.0';
 	}
+
+	/**
+	 * Get the client's IP address from a WooCommerce order, falling back to direct detection.
+	 * 
+	 * @since 1.0.0
+	 * @param \WC_Order $order The WooCommerce order object.
+	 * @return string The client's IP address.
+	 */
 	private function client_ip_from_order($order){
 		$ip=$order->get_customer_ip_address(); return $ip?$ip:$this->client_ip();
 	}
+
+	/**
+	 * Check if an IP address is within a given CIDR range.
+	 * 
+	 * @since 1.0.0
+	 * @param string $ip   The IP address to check.
+	 * @param string $cidr The CIDR range
+	 * @return bool True if the IP is in the range, false otherwise.
+	 */
 	private function ip_in_cidr($ip,$cidr){
 		if(strpos($cidr,'/')===false) return $ip===$cidr;
 		list($sub,$mask)=explode('/',$cidr); $mask=(int)$mask; $ipl=ip2long($ip); $s=ip2long($sub); if($ipl===false||$s===false) return false;
 		$m=-1 << (32-$mask); return (($ipl & $m)===($s & $m));
 	}
+
+	/**
+	 * JavaScript snippet to set the required cookie for JS challenge.
+	 * 
+	 * @since 1.0.0
+	 * @return string JavaScript code to set the cookie.
+	 */
 	private function js_challenge(){
 		$c=esc_js(get_option(SWFO_Opt::k('required_cookie'),'swfo_js'));
 		return "(function(){try{var n='{$c}',v=Math.random().toString(36).slice(2,10),d=new Date();d.setTime(d.getTime()+5*60*1000);document.cookie=n+'='+v+'; path=/; expires='+d.toUTCString()+'; SameSite=Lax';}catch(e){}})();";
 	}
 
-	/** Simple math CAPTCHA (stateless-ish) */
+	/**
+	 * Issue a simple math CAPTCHA challenge.
+	 * * Generates two random operands (3-9 and 2-8) and a random operator (+, -, *).
+	 * * Creates a nonce tied to the specific challenge for stateless verification.
+	 * * Returns an array with operands, operator, question string, and nonce.
+	 * @since 2.0.0
+	 * @return array Associative array with keys:
+	 *               - 'a'  (int)    First operand.
+	 *               - 'b'  (int)    Second operand.
+	 *               - 'op' (string) Operator ('+', '-', '*').
+	 *               - 'q'  (string) Question string (e.g., "3 + 4").
+	 *               - 'n'  (string) Nonce for verification.
+	 */ 
 	private function captcha_issue(){
 		$a = rand(3,9);
 		$b = rand(2,8);
@@ -1709,6 +2571,20 @@ class SWFO_Plugin {
 		$nonce = wp_create_nonce('swfo_cpt_'.$a.'_'.$b.'_'.$op);
 		return ['a'=>$a,'b'=>$b,'op'=>$op,'q'=>"$a $op $b",'n'=>$nonce];
 	}
+
+	/**
+	 * Verify the answer to a math CAPTCHA challenge.
+	 * 
+	 * Validates the provided answer against the expected result based on the
+	 * operands and operator encoded in the nonce. Returns true if the answer
+	 * is correct and the nonce is valid; false otherwise.
+	 * 
+	 * @since 2.0.0
+	 * @param string|int $ans   The user's answer to verify.
+	 * @param string     $nonce The nonce received with the challenge.
+	 * @param string     $op    The operator used in the challenge ('+', '-', '*').
+	 * @return bool True if the answer is correct and nonce is valid, false otherwise.
+	 */
 	private function captcha_verify($ans, $nonce, $op = '+'){
 		if(!$ans || !$nonce) return false;
 		$ans = (int) $ans;
@@ -1725,34 +2601,30 @@ class SWFO_Plugin {
 		return false;
 	}
 
-	/** ===== wp-config editing (safe try) ===== */
-	function maybe_write_wp_config_constants(){
-		if(!is_admin()) return;
-		$start="/* SWFO_CONSTANTS_START */"; $end="/* SWFO_CONSTANTS_END */";
-		$snippet="\n$start\n".
-			"define('SWFO_USE_REDIS', ".(get_option(SWFO_Opt::k('use_redis'),false)?'true':'false').");\n".
-			"$end\n";
-		$cfg=ABSPATH.'wp-config.php'; if(!file_exists($cfg)) return;
-		$txt=@file_get_contents($cfg); if($txt===false || strpos($txt,$start)!==false) return;
-		$needle="/* That's all, stop editing! Happy publishing. */";
-		if(is_writable($cfg)){
-			$pos=strpos($txt,$needle); $new = ($pos!==false)? substr_replace($txt,$snippet,$pos,0):($txt.$snippet);
-			@copy($cfg, $cfg.'.bak_'.time()); @file_put_contents($cfg,$new);
-			if(strpos(@file_get_contents($cfg),$start)===false){
-				add_action('admin_notices', function()use($snippet){ echo '<div class="error"><p>SWFO: Could not write constants. Please paste:<pre>'.esc_html($snippet).'</pre></p></div>'; });
-			}else{
-				add_action('admin_notices', function(){ echo '<div class="updated"><p>SWFO: Constants added to wp-config.php (backup created).</p></div>'; });
-			}
-		}else{
-			add_action('admin_notices', function()use($snippet){ echo '<div class="error"><p>SWFO recommends adding constants. Paste once into <code>wp-config.php</code>:<pre>'.esc_html($snippet).'</pre></p></div>'; });
-		}
-	}
-
+	/**
+	 * Add a "Settings" link to the plugin entry on the Plugins page.
+	 *
+	 * @since 1.0.0
+	 * @param array $links Existing plugin action links.
+	 * @return array Modified plugin action links with "Settings" prepended.
+	 */
 	function links($links){ array_unshift($links,'<a href="'.admin_url('admin.php?page=swfo').'">Settings</a>'); return $links; }
 
 	/**
-	 * REST hit logger: records IP, time, method, route, UA, and sanitized params.
-	 * NOTE: Always returns $result untouched.
+	 * Log REST API hits to a Redis list or transient ring buffer.
+	 *
+	 * Captures details of each REST request (path, method, IP, user agent,
+	 * parameters) and stores them in a Redis list (preferred) or a transient
+	 * array. Respects the master enable/disable switch and caps the payload
+	 * size to ~6KB per entry. Configurable maximum number of entries is
+	 * controlled by the `api_hits_max` option (default 1000).
+	 *
+	 * @since 2.0.0
+	 *
+	 * @param mixed               $result  The response to be sent to the client.
+	 * @param \WP_REST_Server     $handler The REST server instance.
+	 * @param \WP_REST_Request    $request The REST request object.
+	 * @return mixed The original $result, unmodified.
 	 */
 	public function rest_hit_logger($result, $handler, $request){
 		// Respect master switch + ensure request object
@@ -1781,8 +2653,24 @@ class SWFO_Plugin {
 		return $result;
 	}
 
-	/** Push an API-hit entry into Redis list or transient ring buffer */
-
+	/**
+	 * Push a new API hit entry to storage (Redis or transient).
+	 *
+	 * Attempts to push to a Redis list `swfo:api_hits` first, trimming to
+	 * the configured maximum length. On Redis failure, falls back to a
+	 * transient array keyed by {@see SWFO_Opt::k('api_hits')}, trimming as needed.
+	 * @since 2.0.0
+	 * @param array $entry Associative array representing the API hit entry.
+	 *                     Expected keys:
+	 *                     - 't'      (int)    Unix timestamp.
+	 *                     - 'ip'     (string) Client IP address.
+	 *                     - 'm'      (string) HTTP method (e.g., GET, POST).
+	 *                     - 'path'   (string) Full REST path (e.g., /wp-json/wc/v3/orders).
+	 *                     - 'route'  (string) REST route (e.g., /wc/v3/orders).
+	 *                     - 'ua'		 (string) User agent string.
+	 *                     - 'data'   (mixed) Request parameters (array/object).
+	 * @return void
+	 */
 	private function api_hits_push(array $entry){
 		$max = max(100, (int) get_option(SWFO_Opt::k('api_hits_max'), 1000));
 		if ($this->use_redis && $this->redis){
@@ -1804,7 +2692,25 @@ class SWFO_Plugin {
 		set_transient($key, $hits, DAY_IN_SECONDS);
 	}
 
-	/** Retrieve API hits (newest first). Always returns array. */
+	/**
+	 * Retrieve stored API hit entries from Redis or transient.
+	 * 
+	 * Attempts to read from a Redis list `swfo:api_hits` first, decoding each
+	 * JSON entry. On Redis failure, falls back to a transient array keyed by
+	 * {@see SWFO_Opt::k('api_hits')}. Always returns an array of entries, or
+	 * an empty array if none are present.
+	 *
+	 * @since 2.0.0
+	 * @return array[] Array of API hit entries. Each entry is an associative array with
+	 * 							 keys:
+	 * 							- 't'      (int)    Unix timestamp.
+	 * 							- 'ip'     (string) Client IP address.
+	 * 							- 'm'      (string) HTTP method (e.g., GET, POST).
+	 * 							- 'path'   (string) Full REST path (e.g., /wp-json/wc/v3/orders).
+	 * 							- 'route'	(string) REST route (e.g., /wc/v3/orders).
+	 * 							- 'ua'		 (string) User agent string.
+	 * 							- 'data'   (mixed) Request parameters (array/object).
+	 */
 	private function api_hits_get(){
 		if ($this->use_redis && $this->redis){
 			try{
@@ -1822,7 +2728,15 @@ class SWFO_Plugin {
 		return is_array($hits) ? $hits : [];
 	}
 
-	/** Clear API hits */
+	/**
+	 * Clear all stored API hit entries from Redis or transient.
+	 * 
+	 * Attempts to delete the Redis list `swfo:api_hits` first; on failure
+	 * or when Redis is not in use, deletes the corresponding transient.
+	 *
+	 * @since 2.0.0
+	 * @return void
+	 */
 	private function api_hits_clear(){
 		if ($this->use_redis && $this->redis){
 			try{ $this->redis->del('swfo:api_hits'); return; }
@@ -1831,7 +2745,22 @@ class SWFO_Plugin {
 		delete_transient(SWFO_Opt::k('api_hits'));
 	}
 
-	/** Export handler: CSV download of API hits */
+	/**
+	 * Export API hits as a CSV file (from admin button).
+	 * 
+	 * Checks permissions and nonce, retrieves all hits, and streams a CSV
+	 * download with appropriate headers. Each row contains:
+	 * - datetime (Y-m-d H:i:s)
+	 * - ip
+	 * - method
+	 * - path
+	 * - route
+	 * - user_agent
+	 * - data (JSON-encoded parameters)
+	 * 
+	 * @since 2.0.0
+	 * @return void (exits after output)
+	 */
 	public function handle_export_api_hits(){
 		if (!current_user_can('manage_options')) wp_die('Forbidden');
 		check_admin_referer('swfo_export_hits');
@@ -1860,7 +2789,15 @@ class SWFO_Plugin {
 		exit;
 	}
 
-	/** Clear handler (from admin button) */
+	/**
+	 * Clear all stored API hit entries (from admin button).
+	 * 
+	 * Checks permissions and nonce, clears all hits, then redirects back
+	 * to the settings page with the #apihits tab.
+	 * 
+	 * @since 2.0.0
+	 * @return void (exits after redirect)
+	 */
 	public function handle_clear_api_hits(){
 		if (!current_user_can('manage_options')) wp_die('Forbidden');
 		check_admin_referer('swfo_clear_hits');
@@ -1869,7 +2806,16 @@ class SWFO_Plugin {
 		exit;
 	}
 
-	/** Mask common sensitive fields recursively */
+	/**
+	 * Recursively mask sensitive fields in an array or object.
+	 * 
+	 * Scans the input for keys commonly associated with sensitive data
+	 * (e.g., 'password', 'token', 'api_key') and replaces their values with '***'.
+	 * Works recursively on nested arrays and objects. Leaves primitive values unchanged.
+	 * @since 2.0.0
+	 * @param mixed $val The input value (array, object, or primitive).
+	 * @return mixed The input with sensitive fields masked.
+	 */
 	private function mask_sensitive($val){
 		$keys = ['password','pass','pwd','secret','token','api_key','apikey','key','authorization','auth','hmac','signature','x-wc-api-key','x-wc-hmac'];
 		if (is_array($val)){
@@ -1897,7 +2843,20 @@ class SWFO_Plugin {
 		return $val;
 	}
 
-	/** Truncate nested JSON-ish payloads to a safe size budget */
+	/**
+	 * Truncate a data structure to a JSON string of limited length.
+	 * 
+	 * Encodes the input as JSON and checks its length. If it exceeds
+	 * the specified limit, truncates the JSON string to that length
+	 * and attempts to decode it back to an array. If decoding fails,
+	 * returns a placeholder array indicating truncation. If within
+	 * the limit, returns the original data unchanged.
+	 * 
+	 * @since 2.0.0
+	 * @param mixed $data  The input data (array/object).
+	 * @param int   $limit Maximum allowed length of the JSON string.
+	 * @return mixed The original data if within limit, or a truncated version.
+	 */
 	private function truncate_json($data, $limit){
 		$json = wp_json_encode($data);
 		if ($json === null) return $data;
@@ -1906,7 +2865,16 @@ class SWFO_Plugin {
 		return json_decode(substr($json, 0, $limit), true) ?: ['_truncated_' => true];
 	}
 
-	/** Simple array paginator */
+	/**
+	 * Paginate an array of items.
+	 *
+	 * @since 1.0.0
+	 * @param array $items    The full array of items to paginate.
+	 * @param int   $page     The current page number (1-based).
+	 * @param int   $per_page Number of items per page.
+	 * @return array Tuple of (paged items array, current page, total pages, total
+	 * 							items).
+	 */
 	private function paginate_array(array $items, int $page, int $per_page){
 		$total = count($items);
 		$pages = max(1, (int)ceil($total / max(1,$per_page)));
@@ -1915,14 +2883,37 @@ class SWFO_Plugin {
 		return [ array_slice($items, $offs, $per_page), $page, $pages, $total ];
 	}
 
-	/** Build admin url with tab + args + hash */
+	/**
+	 * Generate a URL for a specific admin tab with optional query args.
+	 *
+	 * @since 1.0.0
+	 * @param string $tab  The tab identifier (e.g., 'settings', 'logs').
+	 * @param array  $args Optional associative array of additional query args.
+	 * @return string The generated URL.
+	 */
 	private function tab_url($tab, array $args = []){
 		$base = admin_url('admin.php?page=swfo');
 		if(!empty($args)) $base = add_query_arg($args, $base);
 		return $base . '#' . rawurlencode($tab);
 	}
 
-	/** Render compact pagination (First/Prev/Next/Last) */
+	/**
+	 * Render pagination controls for admin tables.
+	 *
+	 * Outputs HTML for pagination controls, including First/Prev and Next/Last
+	 * buttons, and a status indicator. Disables buttons as appropriate. Uses
+	 * the provided tab and page argument name to construct URLs. Accepts extra
+	 * query args to preserve in the links.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param string $tab      The current tab identifier.
+	 * @param string $arg_page The name of the page number query argument.
+	 * @param int    $page     The current page number (1-based).
+	 * @param int    $pages    The total number of pages.
+	 * @param array  $extra    Optional associative array of additional query args to preserve.
+	 * @return void Outputs HTML directly.
+	 */
 	private function render_pager($tab, $arg_page, $page, $pages, array $extra = []){
 		if($pages <= 1) return;
 		$q = array_merge(['swfo_tab'=>$tab], $extra);
@@ -1946,4 +2937,8 @@ class SWFO_Plugin {
 		echo '</div></div>';
 	}
 }
+
+/**
+ * Bootstrap the plugin.
+ */
 add_action('plugins_loaded', ['SWFO_Plugin','boot']);
