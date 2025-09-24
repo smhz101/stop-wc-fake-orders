@@ -56,6 +56,7 @@ class SWFO_Plugin {
 		'enable_api_hit_logging'=> true,  // master switch
 		'api_hits_max'=> 1000,  // keep last N hits (Redis list or transient)
 		// Store API hardening (GET reads)
+		'store_api_write_rate_limit' => 60, // writes/window for /wc/store/cart|checkout (per IP)
 		'store_api_mode' => 'same-origin', // 'open' | 'same-origin' | 'js-cookie' | 'api-key'
 		'store_api_rate_limit' => 120,     // GETs/window for /wc/store/* (per IP)
 	];
@@ -908,6 +909,10 @@ class SWFO_Plugin {
 			$lines = isset($_POST[$arr]) ? array_filter(array_map('trim', explode("\n", $_POST[$arr]))) : [];
 			update_option(SWFO_Opt::k($arr), $lines);
 		}
+
+		if (isset($_POST['webhook_url'])) {
+			update_option(SWFO_Opt::k('webhook_url'), esc_url_raw($_POST['webhook_url']));
+		}
 	}
 
 	function handle_generate_key(){
@@ -981,6 +986,12 @@ class SWFO_Plugin {
 
 		$route = $request->get_route();
 		$ip    = $this->client_ip();
+
+		// Hard ban checks (IP/email)
+		if ( $this->is_banned_ip($ip) ) {
+			$this->log('hard_ban_ip_hit', 'ip:'.$ip.' route:'.$route);
+			return new WP_Error('swfo_banned', 'Forbidden', ['status'=>403]);
+		}
 
 		// Per-route exemptions for trusted integrations.
 		if ( apply_filters( 'swfo_route_is_exempt', false, $route, $request ) ) {
@@ -1180,6 +1191,43 @@ class SWFO_Plugin {
 		return $result;
 	}
 
+	private function ban_key($type, $val){ return "ban:{$type}:".md5(strtolower(trim($val))); }
+
+	public function ban_ip($ip, $ttl_seconds = 3600){
+		$key = $this->ban_key('ip',$ip);
+		if ($this->use_redis && $this->redis){
+			$this->redis->setEx('swfo:'.$key, $ttl_seconds, 1);
+		} else {
+			set_transient('swfo_'.$key, 1, $ttl_seconds);
+		}
+		$this->log('ban_ip_set', "ip=$ip ttl=$ttl_seconds");
+	}
+
+	public function is_banned_ip($ip){
+		$key = $this->ban_key('ip',$ip);
+		if ($this->use_redis && $this->redis){
+			return (bool) $this->redis->exists('swfo:'.$key);
+		}
+		return (bool) get_transient('swfo_'.$key);
+	}
+
+	public function ban_email($email, $ttl_seconds = 3600){
+		$key = $this->ban_key('email',$email);
+		if ($this->use_redis && $this->redis){
+			$this->redis->setEx('swfo:'.$key, $ttl_seconds, 1);
+		} else {
+			set_transient('swfo_'.$key, 1, $ttl_seconds);
+		}
+		$this->log('ban_email_set', "email=$email ttl=$ttl_seconds");
+	}
+
+	public function is_banned_email($email){
+		$key = $this->ban_key('email',$email);
+		if ($this->use_redis && $this->redis){
+			return (bool) $this->redis->exists('swfo:'.$key);
+		}
+		return (bool) get_transient('swfo_'.$key);
+	}
 
 	/** ===== Checkout Harden (forms) ===== */
 	function checkout_fields(){
