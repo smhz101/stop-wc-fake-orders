@@ -270,13 +270,6 @@ class SWFO_Plugin {
 		add_action( 'plugins_loaded', array( $this, 'load_textdomain' ) );
 	}
 
-	function add_privacy_policy_content() {
-		if ( function_exists( 'wp_add_privacy_policy_content' ) ) {
-				$content = __( 'Stop WooCommerce Fake Orders may log REST API request metadata (IP address, user agent, request path, method, and masked parameters) for rate-limiting and security diagnostics. Logging can be disabled in the plugin settings. Data is stored transiently in the database or Redis and is pruned to the configured limits. If a webhook is configured, minimal event payloads are sent to that endpoint.', 'stop-woocommerce-fake-orders' );
-				wp_add_privacy_policy_content( __( 'Stop WooCommerce Fake Orders', 'stop-woocommerce-fake-orders' ), wp_kses_post( "<p>{$content}</p>" ) );
-		}
-	}
-
 	/**
 	 * Initialize the Redis client if enabled and available.
 	 *
@@ -315,16 +308,23 @@ class SWFO_Plugin {
 			return;
 		}
 
+		wp_register_style( 'swfo-admin', plugins_url( 'assets/admin/css/admin.css', __FILE__ ), array(), '4.5.0' );
+		wp_enqueue_style( 'swfo-admin' );
+
 		wp_register_script(
 			'swfo-chart',
-			plugins_url( 'assets/js/chart.min.js', __FILE__ ),
+			plugins_url( 'assets/admin/js/chart.min.js', __FILE__ ),
 			array(),
 			'4.5.0',
 			true
 		);
 
-		// Lightweight inline module (no external file to keep single-file plugin)
-		wp_register_script( 'swfo-admin', false, array( 'jquery', 'swfo-chart' ), '2.1.0', true );
+		$now     = time();
+		$metrics = $this->get_metrics_for_ui( $now );
+		$byType  = $metrics['byType'];
+		$perHour = $metrics['perHour'];
+
+		wp_register_script( 'swfo-admin', plugins_url( 'assets/admin/js/scripts.js', __FILE__ ), array( 'jquery', 'swfo-chart' ), '2.1.0', true );
 
 		wp_localize_script(
 			'swfo-admin',
@@ -336,10 +336,16 @@ class SWFO_Plugin {
 				'i18n'          => array(
 					'banConfirm' => __( 'Clear all API hits?', 'default' ), // (example—reuse if needed)
 				),
+				'charts'        => array(
+					'typesLabels' => wp_json_encode( array_keys( $byType ) ),
+					'typesData'   => wp_json_encode( array_values( $byType ) ),
+					'hoursLabels' => wp_json_encode( range( 1, 24 ) ),
+					'hoursData'   => wp_json_encode( $perHour ),
+				),
 			)
 		);
 
-		wp_add_inline_script( 'swfo-admin', $this->admin_polling_js() );
+		// wp_add_inline_script( 'swfo-admin', $this->admin_polling_js() );
 		wp_enqueue_script( 'swfo-admin' );
 	}
 
@@ -486,49 +492,70 @@ class SWFO_Plugin {
 	JS;
 	}
 
+	function add_privacy_policy_content() {
+		if ( function_exists( 'wp_add_privacy_policy_content' ) ) {
+			$content = __( 'Stop WooCommerce Fake Orders may log REST API request metadata (IP address, user agent, request path, method, and masked parameters) for rate-limiting and security diagnostics. Logging can be disabled in the plugin settings. Data is stored transiently in the database or Redis and is pruned to the configured limits. If a webhook is configured, minimal event payloads are sent to that endpoint.', 'stop-woocommerce-fake-orders' );
+			wp_add_privacy_policy_content( __( 'Stop WooCommerce Fake Orders', 'stop-woocommerce-fake-orders' ), wp_kses_post( "<p>{$content}</p>" ) );
+		}
+	}
+
 	/**
-	 * AJAX: Fetch "Recent Events" items for live admin updates.
+	 * AJAX: Return recent events (admin only).
 	 *
-	 * Expects authenticated requests from the SWFO settings screen and returns a JSON
-	 * payload containing recent log entries (optionally filtered by a UNIX timestamp).
+	 * - Verifies capability + nonce.
+	 * - Supports incremental polling via `since` (unix timestamp, seconds).
+	 * - Returns items newest-first.
+	 * - Response shape: { success: true, data: { items: [], server_time: <int> } }
 	 *
-	 * Request:
-	 * - Capability: Current user must have `manage_options`.
-	 * - Nonce: `swfo_admin` (sent as `_ajax_nonce`).
-	 * - Query param `since` (optional, int): If provided, only events with `t` > `since`
-	 *   are returned. Useful for incremental polling.
-	 *
-	 * Response (on success):
-	 * - `items` (array): Log entries, newest-first as stored, each with keys like `t`, `type`, `note`.
-	 * - `server_time` (int): Current server UNIX timestamp to be used as the next `since` cursor.
-	 *
-	 * HTTP Status:
-	 * - 403 on capability failure.
-	 * - 200 with `success: true` on success, `success: false` on nonce/capability failure.
-	 *
-	 * @since 2.0.0
-	 *
-	 * @return void Sends a JSON response and exits.
+	 * @since 1.0.0
 	 */
 	public function ajax_get_events() {
+		// Ensure request context + capability.
+		if ( ! wp_doing_ajax() ) {
+			wp_send_json_error( array( 'message' => 'invalid_context' ), 400 );
+		}
 		if ( ! current_user_can( 'manage_options' ) ) {
 			wp_send_json_error( array( 'message' => 'forbidden' ), 403 );
 		}
+
+		// Nonce (expect _ajax_nonce param — see wp_localize_script()).
 		check_ajax_referer( 'swfo_admin', '_ajax_nonce' );
 
-		$since = isset( $_GET['since'] ) ? intval( $_GET['since'] ) : 0;
+		// Params (GET in admin-ajax).
+		$since = isset( $_GET['since'] ) ? absint( $_GET['since'] ) : 0;
 
-		$logs = $this->logs_get();
+		// Fetch + filter.
+		$logs = (array) $this->logs_get();
+
 		if ( $since > 0 ) {
 			$logs = array_values(
 				array_filter(
-					(array) $logs,
-					static function ( $r ) use ( $since ) {
-						$t = isset( $r['t'] ) ? (int) $r['t'] : 0;
+					$logs,
+					static function ( $row ) use ( $since ): bool {
+						$t = isset( $row['t'] ) ? (int) $row['t'] : 0;
 						return ( $t > $since );
 					}
 				)
 			);
+		}
+
+		// Sort newest-first (by 't' desc) to match client expectations.
+		if ( ! empty( $logs ) ) {
+			usort(
+				$logs,
+				static function ( $a, $b ): int {
+					$ta = isset( $a['t'] ) ? (int) $a['t'] : 0;
+					$tb = isset( $b['t'] ) ? (int) $b['t'] : 0;
+					// Descending: newest first.
+					return $tb <=> $ta;
+				}
+			);
+		}
+
+		// Optional: cap payload size (keeps bandwidth reasonable).
+		$max_items = 500; // tune if needed.
+		if ( count( $logs ) > $max_items ) {
+			$logs = array_slice( $logs, 0, $max_items );
 		}
 
 		wp_send_json_success(
@@ -537,54 +564,52 @@ class SWFO_Plugin {
 				'server_time' => time(),
 			)
 		);
+		// wp_send_json_* calls exit; no further code.
 	}
 
 	/**
-	 * AJAX: Fetch "API Hits" (wp-json traffic) for live admin updates.
+	 * AJAX: Return recent API hits (admin only). Mirrors ajax_get_events() behavior.
 	 *
-	 * Expects authenticated requests from the SWFO settings screen and returns a JSON
-	 * payload containing recent API-hit entries, optionally filtered by a UNIX
-	 * timestamp cursor.
-	 *
-	 * Request:
-	 * - Capability: Current user must have `manage_options`.
-	 * - Nonce: `swfo_admin` (sent as `_ajax_nonce`).
-	 * - Query param `since` (optional, int): If provided, only hits with `t` > `since`
-	 *   are returned. Use the returned `server_time` as the next cursor when polling.
-	 *
-	 * Response (on success):
-	 * - `items` (array): API-hit entries (newest first), each typically including:
-	 *   `t` (int, timestamp), `ip` (string), `m` (HTTP method), `path` (string),
-	 *   `route` (string), `ua` (string), and `data` (array|string; masked/truncated).
-	 * - `server_time` (int): Current server UNIX timestamp to use for subsequent polls.
-	 *
-	 * HTTP Status:
-	 * - 403 on capability failure.
-	 * - 200 with `success: true` on success (or `success: false` on nonce failure).
-	 *
-	 * @since 2.0.0
-	 *
-	 * @return void Sends a JSON response and exits.
+	 * @since 1.0.0
 	 */
 	public function ajax_get_hits() {
+		if ( ! wp_doing_ajax() ) {
+			wp_send_json_error( array( 'message' => 'invalid_context' ), 400 );
+		}
 		if ( ! current_user_can( 'manage_options' ) ) {
 			wp_send_json_error( array( 'message' => 'forbidden' ), 403 );
 		}
 		check_ajax_referer( 'swfo_admin', '_ajax_nonce' );
 
-		$since = isset( $_GET['since'] ) ? intval( $_GET['since'] ) : 0;
+		$since = isset( $_GET['since'] ) ? absint( $_GET['since'] ) : 0;
 
-		$hits = $this->api_hits_get();
+		$hits = (array) $this->api_hits_get();
 		if ( $since > 0 ) {
 			$hits = array_values(
 				array_filter(
-					(array) $hits,
-					static function ( $r ) use ( $since ) {
-						$t = isset( $r['t'] ) ? (int) $r['t'] : 0;
+					$hits,
+					static function ( $row ) use ( $since ): bool {
+						$t = isset( $row['t'] ) ? (int) $row['t'] : 0;
 						return ( $t > $since );
 					}
 				)
 			);
+		}
+
+		if ( ! empty( $hits ) ) {
+			usort(
+				$hits,
+				static function ( $a, $b ): int {
+					$ta = isset( $a['t'] ) ? (int) $a['t'] : 0;
+					$tb = isset( $b['t'] ) ? (int) $b['t'] : 0;
+					return $tb <=> $ta; // newest-first
+				}
+			);
+		}
+
+		$max_items = 500;
+		if ( count( $hits ) > $max_items ) {
+			$hits = array_slice( $hits, 0, $max_items );
 		}
 
 		wp_send_json_success(
@@ -691,42 +716,55 @@ class SWFO_Plugin {
 	}
 
 	/**
-	 * Output an admin notice if WooCommerce is not active.
-	 *
-	 * Displays a dismissible warning on admin screens (for users with the
-	 * `manage_options` capability) indicating that the plugin works best when
-	 * WooCommerce is active.
-	 *
-	 * @since 1.0.0
+	 * Display admin notice if WooCommerce is not active.
 	 *
 	 * @return void
 	 */
-	function maybe_wc_notice() {
+	public function maybe_wc_notice() {
 		if ( is_admin() && current_user_can( 'manage_options' ) && ! class_exists( 'WooCommerce' ) ) {
-			echo '<div class="notice notice-warning"><p><strong>Stop WooCommerce Fake Orders</strong> works best with WooCommerce active.</p></div>';
+			printf(
+				'<div class="notice notice-warning"><p><strong>%s</strong> %s</p></div>',
+				esc_html__( 'Stop WooCommerce Fake Orders', 'stop-woocommerce-fake-orders' ),
+				esc_html__( 'works best with WooCommerce active.', 'stop-woocommerce-fake-orders' )
+			);
 		}
 	}
 
 	/**
 	 * Ensure plugin options are initialized with default values.
 	 *
-	 * On first run (when the `configured` flag is absent), iterates through the
-	 * `$this->defaults` map and seeds any missing options using `update_option()`.
-	 * Finally sets the `configured` flag so this initialization runs only once.
+	 * On first run (when the `configured` flag is absent), seed any missing options.
+	 * Uses add_option() for first-write (lets us control autoload), and update_option()
+	 * only when needed. Finally sets the `configured` flag so this runs once.
 	 *
 	 * @since 1.0.0
 	 *
 	 * @return void
 	 */
-	function ensure_defaults() {
-		if ( ! get_option( SWFO_Opt::k( 'configured' ) ) ) {
-			foreach ( $this->defaults as $k => $v ) {
-				if ( false === get_option( SWFO_Opt::k( $k ) ) ) {
-					update_option( SWFO_Opt::k( $k ), $v );
+	public function ensure_defaults() {
+		// Early return for readability and to reduce nesting.
+		if ( get_option( SWFO_Opt::k( 'configured' ), false ) ) {
+			return;
+		}
+
+		foreach ( $this->defaults as $key => $value ) {
+			$opt_key  = SWFO_Opt::k( $key );
+			$existing = get_option( $opt_key, false ); // Returns false if option does not exist.
+
+			if ( false === $existing ) {
+				// First-write: prefer add_option() so we can explicitly control autoload.
+				// If these options are not needed on every page load, set autoload to 'no'.
+				add_option( $opt_key, $value, '', 'no' );
+			} else {
+				// Update only if the value actually differs (update_option short-circuits if unchanged).
+				if ( $existing !== $value ) {
+					update_option( $opt_key, $value );
 				}
 			}
-			update_option( SWFO_Opt::k( 'configured' ), 1 );
 		}
+
+		// Mark as configured (autoload 'yes' is fine for this tiny flag).
+		add_option( SWFO_Opt::k( 'configured' ), 1, '', 'yes' );
 	}
 
 	/**
@@ -803,6 +841,57 @@ class SWFO_Plugin {
 	 */
 	function menu() {
 		add_submenu_page( 'woocommerce', 'Stop Fake Orders', 'Stop Fake Orders', 'manage_options', 'swfo', array( $this, 'admin_page' ) );
+	}
+
+	/**
+	 * Return both metrics.
+	 *
+	 * @param int $now
+	 * @return array{byType: array<string,int>, perHour: int[]}
+	 */
+	public function get_metrics_for_ui( $now ) {
+		$events  = array_slice( $this->logs_get(), 0, 100 );
+		$by_type = $this->compute_by_type( $events );
+		$hits    = $this->api_hits_get();
+		$perHour = $this->compute_hits_per_hour( $hits, $now );
+
+		return array(
+			'byType'  => $by_type,
+			'perHour' => $perHour,
+		);
+	}
+
+	/**
+	 * @param array $events
+	 * @return array<string,int>
+	 */
+	public function compute_by_type( array $events ) {
+		$byType = array();
+		foreach ( $events as $e ) {
+			$t            = $e['type'] ?? 'other';
+			$byType[ $t ] = ( $byType[ $t ] ?? 0 ) + 1;
+		}
+		ksort( $byType );
+		return $byType;
+	}
+
+	/**
+	 * @param array $hitsAll
+	 * @param int   $now
+	 * @return int[] 24 buckets
+	 */
+	public function compute_hits_per_hour( array $hitsAll, $now ) {
+		$perHour = array_fill( 0, 24, 0 );
+		foreach ( $hitsAll as $h ) {
+			$dt = (int) ( $h['t'] ?? 0 );
+			if ( $dt >= $now - 24 * 3600 ) {
+				$idx = 23 - (int) floor( ( $now - $dt ) / 3600 );
+				if ( $idx >= 0 && $idx < 24 ) {
+					++$perHour[ $idx ];
+				}
+			}
+		}
+		return $perHour;
 	}
 
 	/**
@@ -891,15 +980,19 @@ class SWFO_Plugin {
 					<?php
 						$ev     = array_slice( $logs, 0, 100 );
 						$byType = array();
+
 					foreach ( $ev as $e ) {
 						$t            = $e['type'] ?? 'other';
-						$byType[ $t ] = ( $byType[ $t ] ?? 0 ) + 1; }
+						$byType[ $t ] = ( $byType[ $t ] ?? 0 ) + 1;
+					}
+
 						ksort( $byType );
 
 						// hits/hour (last 24h)
 						$hitsAll = $this->api_hits_get();
 						$now     = time();
 						$perHour = array_fill( 0, 24, 0 );
+
 					foreach ( $hitsAll as $h ) {
 						$dt = (int) ( $h['t'] ?? 0 );
 						if ( $dt >= $now - 24 * 3600 ) {
@@ -911,30 +1004,15 @@ class SWFO_Plugin {
 					}
 					?>
 						<h3 style="margin-top:24px">Activity</h3>
-						<div style="max-width:900px;display:grid;grid-template-columns:1fr 1fr;gap:18px">
-							<canvas id="swfoTypes"></canvas>
-							<canvas id="swfoHits"></canvas>
+
+						<div class="swfo-chart-grid">
+							<div class="swfo-chart-box">
+								<canvas id="swfoTypes" aria-label="Recent events by type" role="img"></canvas>
+							</div>
+							<div class="swfo-chart-box">
+								<canvas id="swfoHits" aria-label="REST hits last 24 hours" role="img"></canvas>
+							</div>
 						</div>
-						<script>
-						(function(){
-							function load(fn){ if (window.Chart) return fn(); 
-								var s=document.createElement('script'); s.src='https://cdn.jsdelivr.net/npm/chart.js'; s.onload=fn; document.head.appendChild(s); }
-							load(function(){
-								new Chart(document.getElementById('swfoTypes').getContext('2d'), {
-									type:'bar',
-									data:{ labels: <?php echo wp_json_encode( array_keys( $byType ) ); ?>,
-										datasets:[{ label:'Events (last 100)', data: <?php echo wp_json_encode( array_values( $byType ) ); ?> }] },
-									options:{ responsive:true, plugins:{ legend:{display:false} } }
-								});
-								new Chart(document.getElementById('swfoHits').getContext('2d'), {
-									type:'line',
-									data:{ labels: <?php echo wp_json_encode( range( 1, 24 ) ); ?>,
-										datasets:[{ label:'REST hits (last 24h)', data: <?php echo wp_json_encode( $perHour ); ?>, tension:0.2 }] },
-									options:{ responsive:true, plugins:{ legend:{display:false} } }
-								});
-							});
-						})();
-						</script>
 
 					<table class="widefat striped" style="max-width:900px">
 						<tbody>
