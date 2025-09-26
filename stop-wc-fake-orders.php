@@ -15,6 +15,22 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
+if ( ! defined( 'SWFO_VER' ) ) {
+	define( 'SWFO_VER', '2.3.0' );
+}
+
+if ( ! defined( 'SWFO_FILE' ) ) {
+	define( 'SWFO_FILE', __FILE__ );
+}
+
+if ( ! defined( 'SWFO_DIR' ) ) {
+	define( 'SWFO_DIR', plugin_dir_path( __FILE__ ) );
+}
+
+if ( ! defined( 'SWFO_URL' ) ) {
+	define( 'SWFO_URL', plugin_dir_url( __FILE__ ) );
+}
+
 if ( ! defined( 'SWFO_PREFIX' ) ) {
 	define( 'SWFO_PREFIX', 'swfo_' );
 }
@@ -173,6 +189,10 @@ class SWFO_Plugin {
 		'store_api_rate_limit'       => 120,     // GETs/window for /wc/store/* (per IP)
 	);
 
+	public function __construct() {
+		$this->includes();
+	}
+
 	/**
 	 * Bootstrap the singleton instance and initialize plugin hooks.
 	 *
@@ -268,6 +288,10 @@ class SWFO_Plugin {
 		add_action( 'wp_ajax_swfo_get_hits', array( $this, 'ajax_get_hits' ) );
 
 		add_action( 'plugins_loaded', array( $this, 'load_textdomain' ) );
+	}
+
+	public function includes() {
+		include_once SWFO_DIR . 'includes/class-swfo-admin-page.php';
 	}
 
 	/**
@@ -492,11 +516,45 @@ class SWFO_Plugin {
 	JS;
 	}
 
-	function add_privacy_policy_content() {
-		if ( function_exists( 'wp_add_privacy_policy_content' ) ) {
-			$content = __( 'Stop WooCommerce Fake Orders may log REST API request metadata (IP address, user agent, request path, method, and masked parameters) for rate-limiting and security diagnostics. Logging can be disabled in the plugin settings. Data is stored transiently in the database or Redis and is pruned to the configured limits. If a webhook is configured, minimal event payloads are sent to that endpoint.', 'stop-woocommerce-fake-orders' );
-			wp_add_privacy_policy_content( __( 'Stop WooCommerce Fake Orders', 'stop-woocommerce-fake-orders' ), wp_kses_post( "<p>{$content}</p>" ) );
+	/**
+	 * Display admin notice if WooCommerce is not active.
+	 *
+	 * @return void
+	 */
+	public function maybe_wc_notice() {
+		if ( is_admin() && current_user_can( 'manage_options' ) && ! class_exists( 'WooCommerce' ) ) {
+			printf(
+				'<div class="notice notice-warning"><p><strong>%s</strong> %s</p></div>',
+				esc_html__( 'Stop WooCommerce Fake Orders', 'stop-woocommerce-fake-orders' ),
+				esc_html__( 'works best with WooCommerce active.', 'stop-woocommerce-fake-orders' )
+			);
 		}
+	}
+
+	/**
+	 * Register privacy policy guidance on Tools → Privacy.
+	 *
+	 * Adds a translatable, safely-escaped paragraph describing data handling.
+	 *
+	 * @since 1.0.0
+	 * @return void
+	 */
+	public function add_privacy_policy_content() {
+		// Return early if the API isn't available (pre-4.9.6).
+		if ( ! function_exists( 'wp_add_privacy_policy_content' ) ) {
+			return;
+		}
+
+		/* translators: Privacy policy help text shown on Tools → Privacy for the plugin. */
+		$content = esc_html__(
+			'Stop WooCommerce Fake Orders may log REST API request metadata (IP address, user agent, request path, method, and masked parameters) for rate-limiting and security diagnostics. Logging can be disabled in the plugin settings. Data is stored transiently in the database or Redis and is pruned to the configured limits. If a webhook is configured, minimal event payloads are sent to that endpoint.',
+			'stop-woocommerce-fake-orders'
+		);
+
+		wp_add_privacy_policy_content(
+			esc_html__( 'Stop WooCommerce Fake Orders', 'stop-woocommerce-fake-orders' ),
+			sprintf( '<p>%s</p>', $content ) // Content already escaped; only HTML wrapper is output.
+		);
 	}
 
 	/**
@@ -716,21 +774,6 @@ class SWFO_Plugin {
 	}
 
 	/**
-	 * Display admin notice if WooCommerce is not active.
-	 *
-	 * @return void
-	 */
-	public function maybe_wc_notice() {
-		if ( is_admin() && current_user_can( 'manage_options' ) && ! class_exists( 'WooCommerce' ) ) {
-			printf(
-				'<div class="notice notice-warning"><p><strong>%s</strong> %s</p></div>',
-				esc_html__( 'Stop WooCommerce Fake Orders', 'stop-woocommerce-fake-orders' ),
-				esc_html__( 'works best with WooCommerce active.', 'stop-woocommerce-fake-orders' )
-			);
-		}
-	}
-
-	/**
 	 * Ensure plugin options are initialized with default values.
 	 *
 	 * On first run (when the `configured` flag is absent), seed any missing options.
@@ -786,7 +829,7 @@ class SWFO_Plugin {
 	 *
 	 * @return void
 	 */
-	function setup_redis() {
+	public function setup_redis() {
 		$this->redis     = null;
 		$this->use_redis = false;
 
@@ -796,27 +839,30 @@ class SWFO_Plugin {
 		}
 
 		$host = get_option( SWFO_Opt::k( 'redis_host' ), '127.0.0.1' );
-		$port = intval( get_option( SWFO_Opt::k( 'redis_port' ), 6379 ) );
+		$port = (int) get_option( SWFO_Opt::k( 'redis_port' ), 6379 );
 		$auth = defined( 'SWFO_REDIS_AUTH' ) ? SWFO_REDIS_AUTH : '';
-		$auth = $auth !== '' ? $auth : (string) get_option( SWFO_Opt::k( 'redis_auth' ), '' );
+		$auth = '' !== $auth ? $auth : (string) get_option( SWFO_Opt::k( 'redis_auth' ), '' );
 		$db   = defined( 'SWFO_REDIS_DB' ) ? (int) SWFO_REDIS_DB : (int) get_option( SWFO_Opt::k( 'redis_db' ), 0 );
 
 		try {
-			$r = new Redis();
-			$r->connect( $host, $port, 1.0, null, 0, 0.0 ); // short timeout
-			if ( $auth !== '' ) {
+			$r = new \Redis();
+			$r->connect( $host, $port, 1.0, null, 0, 0.0 ); // Short timeout.
+
+			if ( '' !== $auth ) {
 				if ( ! $r->auth( $auth ) ) {
-					throw new Exception( 'Redis AUTH failed' );
+					throw new \Exception( 'Redis AUTH failed' );
 				}
 			}
+
 			if ( $db > 0 ) {
-				if ( ! $r->select( $db ) ) {
-					throw new Exception( 'Redis SELECT DB failed' );
+				if ( ! $r->select( (int) $db ) ) {
+					throw new \Exception( 'Redis SELECT DB failed' );
 				}
 			}
-			// quick ping to confirm
-			if ( $r->ping() !== '+PONG' ) {
-				throw new Exception( 'Redis PING failed' );
+
+			// Quick ping to confirm connectivity.
+			if ( '+PONG' !== $r->ping() ) {
+				throw new \Exception( 'Redis PING failed' );
 			}
 
 			$this->redis     = $r;
@@ -824,6 +870,7 @@ class SWFO_Plugin {
 		} catch ( \Throwable $e ) {
 			$this->redis     = null;
 			$this->use_redis = false;
+			// phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
 			error_log( 'SWFO Redis disabled: ' . $e->getMessage() );
 		}
 	}
@@ -836,18 +883,32 @@ class SWFO_Plugin {
 	 * screen via {@see self::admin_page()}.
 	 *
 	 * @since 1.0.0
-	 *
 	 * @return void
 	 */
-	function menu() {
-		add_submenu_page( 'woocommerce', 'Stop Fake Orders', 'Stop Fake Orders', 'manage_options', 'swfo', array( $this, 'admin_page' ) );
+	public function menu() {
+		add_submenu_page(
+			'woocommerce',
+			__( 'Stop Fake Orders', 'stop-woocommerce-fake-orders' ), // Page title.
+			__( 'Stop Fake Orders', 'stop-woocommerce-fake-orders' ), // Menu title.
+			'manage_options',
+			'swfo',
+			array( $this, 'admin_page' )
+		);
 	}
 
 	/**
-	 * Return both metrics.
+	 * Return both metrics for the admin UI.
 	 *
-	 * @param int $now
-	 * @return array{byType: array<string,int>, perHour: int[]}
+	 * Slices recent logs to the first 100 entries, aggregates counts by event type,
+	 * and produces a 24-bucket per-hour hit series ending at $now.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param int $now Unix timestamp (seconds).
+	 * @return array{byType: array<string,int>, perHour: int[]} {
+	 *     @type array<string,int> byType   Event counts keyed by type (sorted by key).
+	 *     @type int[]             perHour  24 integers; index 0 is oldest hour, 23 is current hour.
+	 * }
 	 */
 	public function get_metrics_for_ui( $now ) {
 		$events  = array_slice( $this->logs_get(), 0, 100 );
@@ -856,41 +917,60 @@ class SWFO_Plugin {
 		$perHour = $this->compute_hits_per_hour( $hits, $now );
 
 		return array(
-			'byType'  => $by_type,
+			'byType'  => $by_type, // Keep API keys as-is for UI compatibility.
 			'perHour' => $perHour,
 		);
 	}
 
 	/**
-	 * @param array $events
-	 * @return array<string,int>
+	 * Compute counts by event type.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param array $events List of associative arrays; each may contain 'type'.
+	 * @return array<string,int> Counts keyed by type (sorted ascending by key).
 	 */
 	public function compute_by_type( array $events ) {
 		$byType = array();
+
 		foreach ( $events as $e ) {
-			$t            = $e['type'] ?? 'other';
-			$byType[ $t ] = ( $byType[ $t ] ?? 0 ) + 1;
+			$t            = isset( $e['type'] ) ? (string) $e['type'] : 'other';
+			$byType[ $t ] = ( isset( $byType[ $t ] ) ? (int) $byType[ $t ] : 0 ) + 1;
 		}
+
 		ksort( $byType );
+
 		return $byType;
 	}
 
 	/**
-	 * @param array $hitsAll
-	 * @param int   $now
-	 * @return int[] 24 buckets
+	 * Build a 24-bucket per-hour hit series ending at $now.
+	 *
+	 * Index 23 is the current (latest) hour; 0 is 23 hours ago.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param array $hitsAll List of hits; each item may contain 't' (Unix timestamp).
+	 * @param int   $now     Unix timestamp (seconds).
+	 * @return int[] Array of 24 integers.
 	 */
 	public function compute_hits_per_hour( array $hitsAll, $now ) {
 		$perHour = array_fill( 0, 24, 0 );
+
 		foreach ( $hitsAll as $h ) {
-			$dt = (int) ( $h['t'] ?? 0 );
-			if ( $dt >= $now - 24 * 3600 ) {
-				$idx = 23 - (int) floor( ( $now - $dt ) / 3600 );
+			$dt = isset( $h['t'] ) ? (int) $h['t'] : 0;
+
+			// Only consider the last 24 hours.
+			if ( $dt >= ( (int) $now - ( 24 * 3600 ) ) ) {
+				// Map timestamp into [0..23], where 23 is the current hour.
+				$idx = 23 - (int) floor( ( (int) $now - $dt ) / 3600 );
+
 				if ( $idx >= 0 && $idx < 24 ) {
 					++$perHour[ $idx ];
 				}
 			}
 		}
+
 		return $perHour;
 	}
 
@@ -920,12 +1000,24 @@ class SWFO_Plugin {
 			return;
 		}
 
-		// Save + feedback (redirect back to current tab)
+		if ( isset( $_GET['settings-updated'] ) ) { // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+			add_settings_error(
+				'swfo_settings',
+				'swfo_settings_saved',
+				esc_html__( 'Settings saved.', 'stop-woocommerce-fake-orders' ),
+				'updated'
+			);
+		}
+		settings_errors( 'swfo_settings' );
+
+		// Save + feedback
 		if ( isset( $_POST['swfo_save'] ) && check_admin_referer( 'swfo_save', 'swfo_nonce' ) ) {
 			$this->save_settings();
 			$this->setup_redis();
-			$tab = isset( $_POST['swfo_tab'] ) ? sanitize_text_field( wp_unslash( $_POST['swfo_tab'] ) ) : 'status';
-			wp_safe_redirect( $this->tab_url( $tab ) ); // preserves ?swfo_tab=... and #...
+
+			$tab      = isset( $_POST['swfo_tab'] ) ? sanitize_text_field( wp_unslash( $_POST['swfo_tab'] ) ) : 'status';
+			$redirect = add_query_arg( 'settings-updated', '1', $this->tab_url( $tab ) );
+			wp_safe_redirect( $redirect );
 			exit;
 		}
 
@@ -935,21 +1027,24 @@ class SWFO_Plugin {
 
 		// Simple helper to print tab header
 		$tabs = array(
-			'status'   => 'Status',
-			'limits'   => 'Rate Limits',
-			'edge'     => 'Edge Gate & Identity',
-			'lists'    => 'Allow / Deny',
-			'browser'  => 'Browser Challenges',
-			'redis'    => 'Redis',
-			'logging'  => 'Logs & Export',
-			'events'   => 'Recent Events',
-			'apihits'  => 'API Hits',
-			'storeapi' => 'Store API',
+			'status'   => __( 'Status', 'stop-woocommerce-fake-orders' ),
+			'limits'   => __( 'Rate Limits', 'stop-woocommerce-fake-orders' ),
+			'edge'     => __( 'Edge Gate & Identity', 'stop-woocommerce-fake-orders' ),
+			'lists'    => __( 'Allow / Deny', 'stop-woocommerce-fake-orders' ),
+			'browser'  => __( 'Browser Challenges', 'stop-woocommerce-fake-orders' ),
+			'redis'    => __( 'Redis', 'stop-woocommerce-fake-orders' ),
+			'logging'  => __( 'Logs & Export', 'stop-woocommerce-fake-orders' ),
+			'events'   => __( 'Recent Events', 'stop-woocommerce-fake-orders' ),
+			'apihits'  => __( 'API Hits', 'stop-woocommerce-fake-orders' ),
+			'storeapi' => __( 'Store API', 'stop-woocommerce-fake-orders' ),
 		);
 		?>
 		<div class="wrap">
-			<h1>Stop WooCommerce Fake Orders</h1>
-			<p class="description" style="max-width:900px">Harden your store against spam & abusive automation. Use tabs to navigate.</p>
+			<h1><?php echo esc_html__( 'Stop WooCommerce Fake Orders', 'stop-woocommerce-fake-orders' ); ?></h1>
+			
+			<p class="description" style="max-width:900px">
+				<?php echo esc_html__( 'Harden your store against spam & abusive automation.', 'stop-woocommerce-fake-orders' ); ?>
+			</p>
 
 			<!-- Native WP nav tabs -->
 			<h2 class="nav-tab-wrapper">
@@ -961,21 +1056,14 @@ class SWFO_Plugin {
 			</h2>
 
 			<form method="post" action="<?php echo esc_url( admin_url( 'admin.php?page=swfo' ) ); ?>" style="max-width:1100px;">
+				
 				<?php wp_nonce_field( 'swfo_save', 'swfo_nonce' ); ?>
 				<input type="hidden" name="swfo_save" value="1">
 				<input type="hidden" name="swfo_tab" id="swfo_tab" value="">
 
-				<style>
-					/* Minimal, native-looking: panels hidden by default */
-					.swfo-tab-panel{display:none}
-					.swfo-tab-panel.is-active{display:block}
-					.swfo-two-col{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-					@media (max-width: 1000px){ .swfo-two-col{grid-template-columns:1fr} }
-				</style>
-
 				<!-- STATUS -->
 				<div id="swfo-panel-status" class="swfo-tab-panel">
-					<h2 class="title">Status</h2>
+					<h2 class="title"><?php echo esc_html__( 'Status', 'stop-woocommerce-fake-orders' ); ?></h2>
 
 					<?php
 						$ev     = array_slice( $logs, 0, 100 );
@@ -1003,89 +1091,159 @@ class SWFO_Plugin {
 						}
 					}
 					?>
-						<h3 style="margin-top:24px">Activity</h3>
+					<h3 style="margin-top:24px"><?php echo esc_html__( 'Activity', 'stop-woocommerce-fake-orders' ); ?></h3>
 
-						<div class="swfo-chart-grid">
-							<div class="swfo-chart-box">
-								<canvas id="swfoTypes" aria-label="Recent events by type" role="img"></canvas>
-							</div>
-							<div class="swfo-chart-box">
-								<canvas id="swfoHits" aria-label="REST hits last 24 hours" role="img"></canvas>
-							</div>
+					<div class="swfo-chart-grid">
+						<div class="swfo-chart-box">
+							<canvas id="swfoTypes" aria-label="<?php echo esc_attr__( 'Recent events by type', 'stop-woocommerce-fake-orders' ); ?>" role="img"></canvas>
 						</div>
+						<div class="swfo-chart-box">
+							<canvas id="swfoHits" aria-label="<?php echo esc_attr__( 'REST hits last 24 hours', 'stop-woocommerce-fake-orders' ); ?>" role="img"></canvas>
+						</div>
+					</div>
 
 					<table class="widefat striped" style="max-width:900px">
 						<tbody>
 							<tr>
-								<th style="width:240px;">Redis</th>
+								<th style="width:240px;"><?php echo esc_html__( 'Redis', 'stop-woocommerce-fake-orders' ); ?></th>
 								<td>
 									<?php if ( $this->use_redis && $this->redis ) : ?>
-										<span class="dashicons dashicons-yes"></span> Connected
+										<span class="dashicons dashicons-yes"></span>
+										<?php echo esc_html__( 'Connected', 'stop-woocommerce-fake-orders' ); ?>
 										<code><?php echo esc_html( get_option( SWFO_Opt::k( 'redis_host' ), '127.0.0.1' ) . ':' . get_option( SWFO_Opt::k( 'redis_port' ), 6379 ) ); ?></code>
-										<?php
-										if ( defined( 'SWFO_REDIS_DB' ) ) :
-											?>
-											(DB <?php echo intval( SWFO_REDIS_DB ); ?>)
-											<?php
-else :
-	?>
-											(DB <?php echo intval( get_option( SWFO_Opt::k( 'redis_db' ), 0 ) ); ?>)<?php endif; ?>
+										<?php if ( defined( 'SWFO_REDIS_DB' ) ) : ?>
+											(<?php echo esc_html__( 'DB', 'stop-woocommerce-fake-orders' ); ?> <?php echo (int) SWFO_REDIS_DB; ?>)
+										<?php else : ?>
+											(<?php echo esc_html__( 'DB', 'stop-woocommerce-fake-orders' ); ?> <?php echo (int) get_option( SWFO_Opt::k( 'redis_db' ), 0 ); ?>)
+										<?php endif; ?>
 									<?php else : ?>
-										<span class="dashicons dashicons-warning"></span> Not in use (falling back to transients)
+										<span class="dashicons dashicons-warning"></span>
+										<?php echo esc_html__( 'Not in use (falling back to transients)', 'stop-woocommerce-fake-orders' ); ?>
 									<?php endif; ?>
 								</td>
 							</tr>
-							<tr><th>Window / Limits</th>
+							<tr>
+								<th><?php echo esc_html__( 'Window / Limits', 'stop-woocommerce-fake-orders' ); ?></th>
 								<td>
-									Window: <code><?php echo intval( get_option( SWFO_Opt::k( 'window_seconds' ), 60 ) ); ?>s</code>,
-									IP: <code><?php echo intval( get_option( SWFO_Opt::k( 'ip_rate_limit' ), 50 ) ); ?>/window</code>,
-									Email: <code><?php echo intval( get_option( SWFO_Opt::k( 'email_rate_limit' ), 10 ) ); ?>/window</code>,
-									Store GET: <code><?php echo intval( get_option( SWFO_Opt::k( 'store_api_rate_limit' ), 120 ) ); ?>/window</code>
+									<?php
+									printf(
+										/* translators: 1: window seconds, 2: IP rate limit, 3: email rate limit, 4: Store API GET limit */
+										esc_html__( 'Window: %1$ss, IP: %2$s/window, Email: %3$s/window, Store GET: %4$s/window', 'stop-woocommerce-fake-orders' ),
+										(int) get_option( SWFO_Opt::k( 'window_seconds' ), 60 ),
+										(int) get_option( SWFO_Opt::k( 'ip_rate_limit' ), 50 ),
+										(int) get_option( SWFO_Opt::k( 'email_rate_limit' ), 10 ),
+										(int) get_option( SWFO_Opt::k( 'store_api_rate_limit' ), 120 )
+									);
+									?>
 								</td>
 							</tr>
-							<tr><th>Modes</th>
+							<tr>
+								<th><?php echo esc_html__( 'Modes', 'stop-woocommerce-fake-orders' ); ?></th>
 								<td>
-									HMAC: <code><?php echo get_option( SWFO_Opt::k( 'enable_hmac' ), false ) ? 'on' : 'off'; ?></code>,
-									JS Cookie: <code><?php echo get_option( SWFO_Opt::k( 'enable_js_challenge' ), true ) ? 'on' : 'off'; ?></code>,
-									Honeypot: <code><?php echo get_option( SWFO_Opt::k( 'enable_honeypot' ), true ) ? 'on' : 'off'; ?></code>,
-									Store API mode: <code><?php echo esc_html( get_option( SWFO_Opt::k( 'store_api_mode' ), 'same-origin' ) ); ?></code>
+									<?php
+									$hmac = get_option( SWFO_Opt::k( 'enable_hmac' ), false ) ? 'on' : 'off';
+									$js   = get_option( SWFO_Opt::k( 'enable_js_challenge' ), true ) ? 'on' : 'off';
+									$hp   = get_option( SWFO_Opt::k( 'enable_honeypot' ), true ) ? 'on' : 'off';
+									$mode = get_option( SWFO_Opt::k( 'store_api_mode' ), 'same-origin' );
+									printf(
+										/* translators: 1: hmac mode, 2: js cookie mode, 3: honeypot mode, 4: store api mode */
+										'%1$s <code>%2$s</code>, %3$s <code>%4$s</code>, %5$s <code>%6$s</code>, %7$s <code>%8$s</code>',
+										esc_html__( 'HMAC:', 'stop-woocommerce-fake-orders' ),
+										esc_html( $hmac ),
+										esc_html__( 'JS Cookie:', 'stop-woocommerce-fake-orders' ),
+										esc_html( $js ),
+										esc_html__( 'Honeypot:', 'stop-woocommerce-fake-orders' ),
+										esc_html( $hp ),
+										esc_html__( 'Store API mode:', 'stop-woocommerce-fake-orders' ),
+										esc_html( $mode )
+									);
+									?>
 								</td>
 							</tr>
-							<tr><th>Queues</th>
+							<tr>
+								<th><?php echo esc_html__( 'Queues', 'stop-woocommerce-fake-orders' ); ?></th>
 								<td>
-									Events kept: <code><?php echo intval( get_option( SWFO_Opt::k( 'logs_max' ), 300 ) ); ?></code>,
-									API hits kept: <code><?php echo intval( get_option( SWFO_Opt::k( 'api_hits_max' ), 1000 ) ); ?></code>
+									<?php
+									printf(
+										/* translators: 1: events kept, 2: hits kept */
+										'%1$s <code>%2$d</code>, %3$s <code>%4$d</code>',
+										esc_html__( 'Events kept:', 'stop-woocommerce-fake-orders' ),
+										(int) get_option( SWFO_Opt::k( 'logs_max' ), 300 ),
+										esc_html__( 'API hits kept:', 'stop-woocommerce-fake-orders' ),
+										(int) get_option( SWFO_Opt::k( 'api_hits_max' ), 1000 )
+									);
+									?>
 								</td>
 							</tr>
 						</tbody>
 					</table>
-					<p class="description">Tip: if you enable Redis and set auth/db, counters and logs will scale better under load.</p>
+					<p class="description">
+						<?php echo esc_html__( 'Tip: if you enable Redis and set auth/db, counters and logs will scale better under load.', 'stop-woocommerce-fake-orders' ); ?>
+					</p>
 				</div>
 
 				<!-- RATE LIMITS -->
 				<div id="swfo-panel-limits" class="swfo-tab-panel">
-					<h2 class="title">Rate Limits</h2>
-					<p class="description">Caps how often clients can hit sensitive routes. Start moderate, then tune.</p>
+					<h2 class="title">
+						<?php echo esc_html__( 'Rate Limits', 'stop-woocommerce-fake-orders' ); ?>
+					</h2>
+
+					<p class="description">
+						<?php echo esc_html__( 'Caps how often clients can hit sensitive routes. Start moderate, then tune.', 'stop-woocommerce-fake-orders' ); ?>
+					</p>
+
 					<table class="form-table">
 						<tr>
-							<th scope="row">Window (seconds)</th>
+							<th scope="row">
+								<?php echo esc_html__( 'Window (seconds)', 'stop-woocommerce-fake-orders' ); ?>
+							</th>
 							<td>
-								<input type="number" name="window_seconds" value="<?php echo esc_attr( get_option( SWFO_Opt::k( 'window_seconds' ), 60 ) ); ?>" min="10" step="1">
-								<p class="description">Length of sliding window (default 60s).</p>
+								<input 
+									type="number" 
+									name="window_seconds" 
+									value="<?php echo esc_attr( get_option( SWFO_Opt::k( 'window_seconds' ), 60 ) ); ?>" 
+									min="10" 
+									step="1"
+								/>
+								<p class="description">
+									<?php echo esc_html__( 'Length of sliding window (default 60s).', 'stop-woocommerce-fake-orders' ); ?>
+								</p>
 							</td>
 						</tr>
+
 						<tr>
-							<th scope="row">IP requests per window</th>
+							<th scope="row">
+								<?php echo esc_html__( 'IP requests per window', 'stop-woocommerce-fake-orders' ); ?>
+							</th>
 							<td>
-								<input type="number" name="ip_rate_limit" value="<?php echo esc_attr( get_option( SWFO_Opt::k( 'ip_rate_limit' ), 50 ) ); ?>" min="5" step="1">
-								<p class="description">Max REST calls allowed from one IP within the window before 429.</p>
+								<input 
+									type="number" 
+									name="ip_rate_limit" 
+									value="<?php echo esc_attr( get_option( SWFO_Opt::k( 'ip_rate_limit' ), 50 ) ); ?>" 
+									min="5" 
+									step="1"
+								/>
+								<p class="description">
+									<?php echo esc_html__( 'Max REST calls allowed from one IP within the window before 429.', 'stop-woocommerce-fake-orders' ); ?>
+								</p>
 							</td>
 						</tr>
+
 						<tr>
-							<th scope="row">Email submits per window</th>
+							<th scope="row">
+								<?php echo esc_html__( 'Email submits per window', 'stop-woocommerce-fake-orders' ); ?>
+							</th>
 							<td>
-								<input type="number" name="email_rate_limit" value="<?php echo esc_attr( get_option( SWFO_Opt::k( 'email_rate_limit' ), 10 ) ); ?>" min="1" step="1">
-								<p class="description">Max checkout attempts per email within the window.</p>
+								<input 
+									type="number" 
+									name="email_rate_limit" 
+									value="<?php echo esc_attr( get_option( SWFO_Opt::k( 'email_rate_limit' ), 10 ) ); ?>" 
+									min="1" 
+									step="1"
+								/>
+								<p class="description">
+									<?php echo esc_html__( 'Max checkout attempts per email within the window.', 'stop-woocommerce-fake-orders' ); ?>
+								</p>
 							</td>
 						</tr>
 					</table>
@@ -1093,108 +1251,279 @@ else :
 
 				<!-- EDGE GATE & IDENTITY -->
 				<div id="swfo-panel-edge" class="swfo-tab-panel">
-					<h2 class="title">Edge Gate &amp; Identity</h2>
-					<p class="description">Authenticate server-to-server calls. Public shoppers are not asked for keys.</p>
+					<h2 class="title">
+						<?php echo esc_html__( 'Edge Gate & Identity', 'stop-woocommerce-fake-orders' ); ?>
+					</h2>
+
+					<p class="description">
+						<?php echo esc_html__( 'Authenticate server-to-server calls. Public shoppers are not asked for keys.', 'stop-woocommerce-fake-orders' ); ?>
+					</p>
 
 					<p>
-						<a class="button" href="<?php echo esc_url( admin_url( 'admin-post.php?action=swfo_generate_key' ) ); ?>">Generate API Key</a>
-						<span class="description">Use header <code>X-WC-API-Key</code>. Key is shown once, stored hashed.</span>
+						<a class="button" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=swfo_generate_key' ), 'swfo_gen_key' ) ); ?>">
+							<?php echo esc_html__( 'Generate API Key', 'stop-woocommerce-fake-orders' ); ?>
+						</a>
+						<span class="description">
+							<?php
+							/* translators: 1: header name */
+							printf(
+								esc_html__( 'Use header %1$s. Key is shown once, stored hashed.', 'stop-woocommerce-fake-orders' ),
+								'<code>X-WC-API-Key</code>'
+							);
+							?>
+						</span>
 					</p>
-					<?php if ( $k = get_transient( 'swfo_last_key' ) ) : ?>
-						<div class="inline notice notice-success"><p><strong>New API key:</strong> <code><?php echo esc_html( $k ); ?></code> — copy now.</p></div>
+
+					<?php
+					// Show last generated key once (stored in transient).
+					$k = get_transient( 'swfo_last_key' );
+					if ( $k ) :
+						?>
+						<div class="inline notice notice-success">
+							<p>
+								<strong><?php echo esc_html__( 'New API key:', 'stop-woocommerce-fake-orders' ); ?></strong>
+								<code><?php echo esc_html( $k ); ?></code>
+								— <?php echo esc_html__( 'copy now.', 'stop-woocommerce-fake-orders' ); ?>
+							</p>
+						</div>
 					<?php endif; ?>
 
 					<table class="widefat striped" style="margin-top:10px;">
-						<thead><tr><th>Key ID</th><th>Hash (short)</th><th>Action</th></tr></thead><tbody>
-						<?php if ( empty( $keys ) ) : ?>
-							<tr><td colspan="3"><em>No API keys yet.</em></td></tr>
-							<?php
-						else :
-							foreach ( $keys as $id => $hash ) :
-								?>
+						<thead>
 							<tr>
-								<td><?php echo esc_html( $id ); ?></td>
-								<td><code><?php echo esc_html( substr( $hash, 0, 14 ) ); ?>…</code></td>
-								<td><a class="button-link delete" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=swfo_delete_key&id=' . $id ), 'swfo_del_key' ) ); ?>">Delete</a></td>
+								<th><?php echo esc_html__( 'Key ID', 'stop-woocommerce-fake-orders' ); ?></th>
+								<th><?php echo esc_html__( 'Hash (short)', 'stop-woocommerce-fake-orders' ); ?></th>
+								<th><?php echo esc_html__( 'Action', 'stop-woocommerce-fake-orders' ); ?></th>
 							</tr>
-													<?php
-						endforeach;
-endif;
-						?>
+						</thead>
+						<tbody>
+							<?php if ( empty( $keys ) ) : ?>
+								<tr>
+									<td colspan="3"><em><?php echo esc_html__( 'No API keys yet.', 'stop-woocommerce-fake-orders' ); ?></em></td>
+								</tr>
+								<?php
+							else :
+								foreach ( $keys as $id => $hash ) :
+									$del_url = wp_nonce_url(
+										add_query_arg(
+											array(
+												'action' => 'swfo_delete_key',
+												/* phpcs:ignore WordPress.Security.ValidatedSanitizedInput.MissingUnslash */
+												'id'     => rawurlencode( (string) $id ),
+											),
+											admin_url( 'admin-post.php' )
+										),
+										'swfo_del_key'
+									);
+									?>
+									<tr>
+										<td><?php echo esc_html( (string) $id ); ?></td>
+										<td><code><?php echo esc_html( substr( (string) $hash, 0, 14 ) ); ?>…</code></td>
+										<td>
+											<a class="button-link delete" href="<?php echo esc_url( $del_url ); ?>">
+												<?php echo esc_html__( 'Delete', 'stop-woocommerce-fake-orders' ); ?>
+											</a>
+										</td>
+									</tr>
+									<?php
+								endforeach;
+							endif;
+							?>
 						</tbody>
 					</table>
 
-					<h3>Signed Requests (HMAC)</h3>
+					<h3><?php echo esc_html__( 'Signed Requests (HMAC)', 'stop-woocommerce-fake-orders' ); ?></h3>
+
 					<table class="form-table">
 						<tr>
-							<th>Enable HMAC</th>
+							<th>
+								<?php echo esc_html__( 'Enable HMAC', 'stop-woocommerce-fake-orders' ); ?>
+							</th>
 							<td>
-								<label><input type="checkbox" name="enable_hmac" <?php checked( get_option( SWFO_Opt::k( 'enable_hmac' ), false ) ); ?>> Require signed requests</label>
-								<p class="description">Clients must send <code>X-WC-HMAC</code> and <code>X-WC-Timestamp</code> (±5 min).</p>
+								<label>
+									<input
+										type="checkbox"
+										name="enable_hmac"
+										<?php checked( (bool) get_option( SWFO_Opt::k( 'enable_hmac' ), false ) ); ?>
+									/>
+									<?php echo esc_html__( 'Require signed requests', 'stop-woocommerce-fake-orders' ); ?>
+								</label>
+								<p class="description">
+									<?php
+									/* translators: 1: hmac header, 2: timestamp header */
+									printf(
+										esc_html__( 'Clients must send %1$s and %2$s (±5 min).', 'stop-woocommerce-fake-orders' ),
+										'<code>X-WC-HMAC</code>',
+										'<code>X-WC-Timestamp</code>'
+									);
+									?>
+								</p>
 							</td>
 						</tr>
+
 						<tr>
-							<th>HMAC secret</th>
+							<th>
+								<?php echo esc_html__( 'HMAC secret', 'stop-woocommerce-fake-orders' ); ?>
+							</th>
 							<td>
-								<input type="text" name="hmac_secret" style="width:40%" value="<?php echo esc_attr( get_option( SWFO_Opt::k( 'hmac_secret' ), '' ) ); ?>">
-								<p class="description">Signing string: <code>METHOD|ROUTE|BODY|TIMESTAMP</code>.</p>
+								<input
+									type="text"
+									name="hmac_secret"
+									style="width:40%"
+									value="<?php echo esc_attr( (string) get_option( SWFO_Opt::k( 'hmac_secret' ), '' ) ); ?>"
+								/>
+								<p class="description">
+									<?php
+									/* translators: signing string example */
+									printf(
+										esc_html__( 'Signing string: %s.', 'stop-woocommerce-fake-orders' ),
+										'<code>METHOD|ROUTE|BODY|TIMESTAMP</code>'
+									);
+									?>
+								</p>
 							</td>
 						</tr>
 					</table>
 
-					<h3>Bypass Tokens (trusted jobs)</h3>
-					<p class="description">Header <code>X-SWFO-Bypass</code> lets approved backend jobs skip browser checks.</p>
-					<table class="widefat striped">
-						<thead><tr><th>Name</th><th>Token (short)</th><th>Action</th></tr></thead><tbody>
-						<?php if ( empty( $bypass ) ) : ?>
-							<tr><td colspan="3"><em>No bypass tokens.</em></td></tr>
-							<?php
-						else :
-							foreach ( $bypass as $n => $t ) :
-								?>
-							<tr>
-								<td><?php echo esc_html( $n ); ?></td>
-								<td><code><?php echo esc_html( substr( $t, 0, 10 ) ); ?>…</code></td>
-								<td><a class="button-link delete" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=swfo_delete_bypass&name=' . $n ), 'swfo_del_bp' ) ); ?>">Delete</a></td>
-							</tr>
-													<?php
-						endforeach;
-endif;
+					<h3><?php echo esc_html__( 'Bypass Tokens (trusted jobs)', 'stop-woocommerce-fake-orders' ); ?></h3>
+
+					<p class="description">
+						<?php
+						/* translators: 1: bypass header name */
+						printf(
+							esc_html__( 'Header %s lets approved backend jobs skip browser checks.', 'stop-woocommerce-fake-orders' ),
+							'<code>X-SWFO-Bypass</code>'
+						);
 						?>
+					</p>
+
+					<table class="widefat striped">
+						<thead>
+							<tr>
+								<th><?php echo esc_html__( 'Name', 'stop-woocommerce-fake-orders' ); ?></th>
+								<th><?php echo esc_html__( 'Token (short)', 'stop-woocommerce-fake-orders' ); ?></th>
+								<th><?php echo esc_html__( 'Action', 'stop-woocommerce-fake-orders' ); ?></th>
+							</tr>
+						</thead>
+						<tbody>
+							<?php if ( empty( $bypass ) ) : ?>
+								<tr>
+									<td colspan="3"><em><?php echo esc_html__( 'No bypass tokens.', 'stop-woocommerce-fake-orders' ); ?></em></td>
+								</tr>
+								<?php
+							else :
+								foreach ( $bypass as $n => $t ) :
+									$del_bp_url = wp_nonce_url(
+										add_query_arg(
+											array(
+												'action' => 'swfo_delete_bypass',
+												/* phpcs:ignore WordPress.Security.ValidatedSanitizedInput.MissingUnslash */
+												'name'   => rawurlencode( (string) $n ),
+											),
+											admin_url( 'admin-post.php' )
+										),
+										'swfo_del_bp'
+									);
+									?>
+									<tr>
+										<td><?php echo esc_html( (string) $n ); ?></td>
+										<td><code><?php echo esc_html( substr( (string) $t, 0, 10 ) ); ?>…</code></td>
+										<td>
+											<a class="button-link delete" href="<?php echo esc_url( $del_bp_url ); ?>">
+												<?php echo esc_html__( 'Delete', 'stop-woocommerce-fake-orders' ); ?>
+											</a>
+										</td>
+									</tr>
+									<?php
+								endforeach;
+							endif;
+							?>
 						</tbody>
 					</table>
+
 					<p>
-						<input type="text" name="bp_name" placeholder="name">
-						<input type="text" name="bp_token" placeholder="token (blank = auto-generate)">
+						<input
+							type="text"
+							name="bp_name"
+							placeholder="<?php echo esc_attr__( 'name', 'stop-woocommerce-fake-orders' ); ?>"
+						/>
+						<input
+							type="text"
+							name="bp_token"
+							placeholder="<?php echo esc_attr__( 'token (blank = auto-generate)', 'stop-woocommerce-fake-orders' ); ?>"
+						/>
 						<?php wp_nonce_field( 'swfo_add_bypass' ); ?>
-						<button class="button" formaction="<?php echo esc_url( admin_url( 'admin-post.php?action=swfo_add_bypass' ) ); ?>">Add bypass</button>
+						<button
+							class="button"
+							formaction="<?php echo esc_url( admin_url( 'admin-post.php?action=swfo_add_bypass' ) ); ?>"
+						>
+							<?php echo esc_html__( 'Add bypass', 'stop-woocommerce-fake-orders' ); ?>
+						</button>
 					</p>
 				</div>
 
 				<!-- ALLOW / DENY -->
 				<div id="swfo-panel-lists" class="swfo-tab-panel">
-					<h2 class="title">Allow / Deny Lists</h2>
-					<p class="description">Control which networks are fully trusted or gently discouraged.</p>
+					<h2 class="title">
+						<?php echo esc_html__( 'Allow / Deny Lists', 'stop-woocommerce-fake-orders' ); ?>
+					</h2>
+
+					<p class="description">
+						<?php echo esc_html__( 'Control which networks are fully trusted or gently discouraged.', 'stop-woocommerce-fake-orders' ); ?>
+					</p>
+
 					<table class="form-table">
 						<tr>
-							<th>Allowlist CIDRs</th>
+							<th>
+								<?php echo esc_html__( 'Allowlist CIDRs', 'stop-woocommerce-fake-orders' ); ?>
+							</th>
 							<td>
-								<textarea name="allowlist_cidrs" rows="4" cols="70"><?php echo esc_textarea( implode( "\n", (array) get_option( SWFO_Opt::k( 'allowlist_cidrs' ), array() ) ) ); ?></textarea>
-								<p class="description">IPs/CIDRs here bypass most checks (partners, office ranges). One per line.</p>
+								<textarea
+									name="allowlist_cidrs"
+									rows="4"
+									cols="70"
+								><?php echo esc_textarea( implode( "\n", (array) get_option( SWFO_Opt::k( 'allowlist_cidrs' ), array() ) ) ); ?></textarea>
+								<p class="description">
+									<?php echo esc_html__( 'IPs/CIDRs here bypass most checks (partners, office ranges). One per line.', 'stop-woocommerce-fake-orders' ); ?>
+								</p>
 							</td>
 						</tr>
+
 						<tr>
-							<th>Soft-deny CIDRs (429)</th>
+							<th>
+								<?php echo esc_html__( 'Soft-deny CIDRs (429)', 'stop-woocommerce-fake-orders' ); ?>
+							</th>
 							<td>
-								<textarea name="soft_deny_cidrs" rows="3" cols="70"><?php echo esc_textarea( implode( "\n", (array) get_option( SWFO_Opt::k( 'soft_deny_cidrs' ), array() ) ) ); ?></textarea>
-								<p class="description">IPs/CIDRs receive <code>429 Too Many Requests</code> (not 403). One per line.</p>
+								<textarea
+									name="soft_deny_cidrs"
+									rows="3"
+									cols="70"
+								><?php echo esc_textarea( implode( "\n", (array) get_option( SWFO_Opt::k( 'soft_deny_cidrs' ), array() ) ) ); ?></textarea>
+								<p class="description">
+									<?php
+									/* translators: HTTP status code 429 */
+									printf(
+										esc_html__( 'IPs/CIDRs receive %s (not 403). One per line.', 'stop-woocommerce-fake-orders' ),
+										'<code>429 Too Many Requests</code>'
+									);
+									?>
+								</p>
 							</td>
 						</tr>
+
 						<tr>
-							<th>UA denylist</th>
+							<th>
+								<?php echo esc_html__( 'UA denylist', 'stop-woocommerce-fake-orders' ); ?>
+							</th>
 							<td>
-								<textarea name="ua_denylist" rows="3" cols="70"><?php echo esc_textarea( implode( "\n", (array) get_option( SWFO_Opt::k( 'ua_denylist' ), array() ) ) ); ?></textarea>
-								<p class="description">Substrings of unwanted user agents (e.g. headless scrapers). One per line.</p>
+								<textarea
+									name="ua_denylist"
+									rows="3"
+									cols="70"
+								><?php echo esc_textarea( implode( "\n", (array) get_option( SWFO_Opt::k( 'ua_denylist' ), array() ) ) ); ?></textarea>
+								<p class="description">
+									<?php echo esc_html__( 'Substrings of unwanted user agents (e.g. headless scrapers). One per line.', 'stop-woocommerce-fake-orders' ); ?>
+								</p>
 							</td>
 						</tr>
 					</table>
@@ -1202,37 +1531,93 @@ endif;
 
 				<!-- BROWSER CHALLENGES -->
 				<div id="swfo-panel-browser" class="swfo-tab-panel">
-					<h2 class="title">Browser Challenges</h2>
-					<p class="description">Lightweight friction for bots; minimal impact on humans.</p>
+					<h2 class="title">
+						<?php echo esc_html__( 'Browser Challenges', 'stop-woocommerce-fake-orders' ); ?>
+					</h2>
+
+					<p class="description">
+						<?php echo esc_html__( 'Lightweight friction for bots; minimal impact on humans.', 'stop-woocommerce-fake-orders' ); ?>
+					</p>
+
 					<table class="form-table">
 						<tr>
-							<th>JS cookie challenge</th>
+							<th>
+								<?php echo esc_html__( 'JS cookie challenge', 'stop-woocommerce-fake-orders' ); ?>
+							</th>
 							<td>
-								<label><input type="checkbox" name="enable_js_challenge" <?php checked( get_option( SWFO_Opt::k( 'enable_js_challenge' ), true ) ); ?>> Enable</label>
-								<p class="description">Sets a short-lived cookie via JavaScript to confirm a real browser.</p>
+								<label>
+									<input
+										type="checkbox"
+										name="enable_js_challenge"
+										<?php checked( get_option( SWFO_Opt::k( 'enable_js_challenge' ), true ) ); ?>
+									/>
+									<?php echo esc_html__( 'Enable', 'stop-woocommerce-fake-orders' ); ?>
+								</label>
+								<p class="description">
+									<?php echo esc_html__( 'Sets a short-lived cookie via JavaScript to confirm a real browser.', 'stop-woocommerce-fake-orders' ); ?>
+								</p>
 							</td>
 						</tr>
+
 						<tr>
-							<th>Cookie name</th>
+							<th>
+								<?php echo esc_html__( 'Cookie name', 'stop-woocommerce-fake-orders' ); ?>
+							</th>
 							<td>
-								<input type="text" name="required_cookie" value="<?php echo esc_attr( get_option( SWFO_Opt::k( 'required_cookie' ), 'swfo_js' ) ); ?>">
-								<p class="description">Change only if another plugin conflicts with this cookie name.</p>
+								<input
+									type="text"
+									name="required_cookie"
+									value="<?php echo esc_attr( get_option( SWFO_Opt::k( 'required_cookie' ), 'swfo_js' ) ); ?>"
+								/>
+								<p class="description">
+									<?php echo esc_html__( 'Change only if another plugin conflicts with this cookie name.', 'stop-woocommerce-fake-orders' ); ?>
+								</p>
 							</td>
 						</tr>
+
 						<tr>
-							<th>Honeypot</th>
+							<th>
+								<?php echo esc_html__( 'Honeypot', 'stop-woocommerce-fake-orders' ); ?>
+							</th>
 							<td>
-								<label><input type="checkbox" name="enable_honeypot" <?php checked( get_option( SWFO_Opt::k( 'enable_honeypot' ), true ) ); ?>> Enable</label>
-								<p class="description">Hidden field catches naive bots filling every input.</p>
+								<label>
+									<input
+										type="checkbox"
+										name="enable_honeypot"
+										<?php checked( get_option( SWFO_Opt::k( 'enable_honeypot' ), true ) ); ?>
+									/>
+									<?php echo esc_html__( 'Enable', 'stop-woocommerce-fake-orders' ); ?>
+								</label>
+								<p class="description">
+									<?php echo esc_html__( 'Hidden field catches naive bots filling every input.', 'stop-woocommerce-fake-orders' ); ?>
+								</p>
 							</td>
 						</tr>
+
 						<tr>
-							<th>CAPTCHA after N soft blocks</th>
+							<th>
+								<?php echo esc_html__( 'CAPTCHA after N soft blocks', 'stop-woocommerce-fake-orders' ); ?>
+							</th>
 							<td>
-								<label><input type="checkbox" name="captcha_enabled" <?php checked( get_option( SWFO_Opt::k( 'captcha_enabled' ), true ) ); ?>> Enable CAPTCHA</label>
-								&nbsp;Threshold:
-								<input type="number" name="captcha_after_soft_blocks" value="<?php echo esc_attr( get_option( SWFO_Opt::k( 'captcha_after_soft_blocks' ), 3 ) ); ?>" style="width:80px">
-								<p class="description">Simple math challenge appears only after repeated suspicious activity (soft blocks).</p>
+								<label>
+									<input
+										type="checkbox"
+										name="captcha_enabled"
+										<?php checked( get_option( SWFO_Opt::k( 'captcha_enabled' ), true ) ); ?>
+									/>
+									<?php echo esc_html__( 'Enable CAPTCHA', 'stop-woocommerce-fake-orders' ); ?>
+								</label>
+								&nbsp;
+								<?php echo esc_html__( 'Threshold:', 'stop-woocommerce-fake-orders' ); ?>
+								<input
+									type="number"
+									name="captcha_after_soft_blocks"
+									value="<?php echo esc_attr( get_option( SWFO_Opt::k( 'captcha_after_soft_blocks' ), 3 ) ); ?>"
+									style="width:80px"
+								/>
+								<p class="description">
+									<?php echo esc_html__( 'Simple math challenge appears only after repeated suspicious activity (soft blocks).', 'stop-woocommerce-fake-orders' ); ?>
+								</p>
 							</td>
 						</tr>
 					</table>
@@ -1240,38 +1625,99 @@ endif;
 
 				<!-- REDIS -->
 				<div id="swfo-panel-redis" class="swfo-tab-panel">
-					<h2 class="title">Redis</h2>
-					<p class="description">Use Redis (phpredis) for accurate, scalable counters/bans. Recommended for production.</p>
+					<h2 class="title">
+						<?php echo esc_html__( 'Redis', 'stop-woocommerce-fake-orders' ); ?>
+					</h2>
+
+					<p class="description">
+						<?php echo esc_html__( 'Use Redis (phpredis) for accurate, scalable counters/bans. Recommended for production.', 'stop-woocommerce-fake-orders' ); ?>
+					</p>
+
 					<table class="form-table">
 						<tr>
-							<th>Use Redis</th>
+							<th>
+								<?php echo esc_html__( 'Use Redis', 'stop-woocommerce-fake-orders' ); ?>
+							</th>
 							<td>
-								<label><input type="checkbox" name="use_redis" <?php checked( ( defined( 'SWFO_USE_REDIS' ) && SWFO_USE_REDIS ) || get_option( SWFO_Opt::k( 'use_redis' ), false ) ); ?>> Enable if extension is installed</label>
-								<p class="description">If disabled or unavailable, the plugin falls back to WordPress transients.</p>
+								<label>
+									<input
+										type="checkbox"
+										name="use_redis"
+										<?php checked( ( defined( 'SWFO_USE_REDIS' ) && SWFO_USE_REDIS ) || get_option( SWFO_Opt::k( 'use_redis' ), false ) ); ?>
+									/>
+									<?php echo esc_html__( 'Enable if extension is installed', 'stop-woocommerce-fake-orders' ); ?>
+								</label>
+								<p class="description">
+									<?php echo esc_html__( 'If disabled or unavailable, the plugin falls back to WordPress transients.', 'stop-woocommerce-fake-orders' ); ?>
+								</p>
 							</td>
 						</tr>
+
 						<tr>
-							<th>Host</th>
-							<td><input type="text" name="redis_host" value="<?php echo esc_attr( get_option( SWFO_Opt::k( 'redis_host' ), '127.0.0.1' ) ); ?>"></td>
-						</tr>
-						<tr>
-							<th>Port</th>
-							<td><input type="number" name="redis_port" value="<?php echo esc_attr( get_option( SWFO_Opt::k( 'redis_port' ), 6379 ) ); ?>"></td>
-						</tr>
-						<tr>
-							<th>Password</th>
+							<th>
+								<?php echo esc_html__( 'Host', 'stop-woocommerce-fake-orders' ); ?>
+							</th>
 							<td>
-								<input type="password" name="redis_auth" autocomplete="new-password"
-									value="<?php echo esc_attr( ( defined( 'SWFO_REDIS_AUTH' ) && SWFO_REDIS_AUTH !== '' ) ? '********' : get_option( SWFO_Opt::k( 'redis_auth' ), '' ) ); ?>">
-								<p class="description">If your Redis requires AUTH. Prefer setting <code>SWFO_REDIS_AUTH</code> in <code>wp-config.php</code> for secrets.</p>
+								<input
+									type="text"
+									name="redis_host"
+									value="<?php echo esc_attr( get_option( SWFO_Opt::k( 'redis_host' ), '127.0.0.1' ) ); ?>"
+								/>
 							</td>
 						</tr>
+
 						<tr>
-							<th>DB index</th>
+							<th>
+								<?php echo esc_html__( 'Port', 'stop-woocommerce-fake-orders' ); ?>
+							</th>
 							<td>
-								<input type="number" min="0" step="1" name="redis_db"
-									value="<?php echo esc_attr( defined( 'SWFO_REDIS_DB' ) ? (int) SWFO_REDIS_DB : (int) get_option( SWFO_Opt::k( 'redis_db' ), 0 ) ); ?>">
-								<p class="description">Select the logical database (0..15). Ignored if set via constant.</p>
+								<input
+									type="number"
+									name="redis_port"
+									value="<?php echo esc_attr( get_option( SWFO_Opt::k( 'redis_port' ), 6379 ) ); ?>"
+								/>
+							</td>
+						</tr>
+
+						<tr>
+							<th>
+								<?php echo esc_html__( 'Password', 'stop-woocommerce-fake-orders' ); ?>
+							</th>
+							<td>
+								<input
+									type="password"
+									name="redis_auth"
+									autocomplete="new-password"
+									value="<?php echo esc_attr( ( defined( 'SWFO_REDIS_AUTH' ) && '' !== SWFO_REDIS_AUTH ) ? '********' : get_option( SWFO_Opt::k( 'redis_auth' ), '' ) ); ?>"
+								/>
+								<p class="description">
+									<?php
+									/* translators: 1: constant name, 2: file name */
+									printf(
+										esc_html__( 'If your Redis requires AUTH. Prefer setting %1$s in %2$s for secrets.', 'stop-woocommerce-fake-orders' ),
+										'<code>SWFO_REDIS_AUTH</code>',
+										'<code>wp-config.php</code>'
+									);
+									?>
+								</p>
+							</td>
+						</tr>
+
+						<tr>
+							<th>
+								<?php echo esc_html__( 'DB index', 'stop-woocommerce-fake-orders' ); ?>
+							</th>
+							<td>
+								<input
+									type="number"
+									min="0"
+									step="1"
+									name="redis_db"
+									value="<?php echo esc_attr( defined( 'SWFO_REDIS_DB' ) ? (int) SWFO_REDIS_DB : (int) get_option( SWFO_Opt::k( 'redis_db' ), 0 ) ); ?>"
+								/>
+								<p class="description">
+									<?php echo esc_html__( 'Select the logical database (0..15). Ignored if set via constant.', 'stop-woocommerce-fake-orders' ); ?>
+								</p>
 							</td>
 						</tr>
 					</table>
@@ -1279,42 +1725,115 @@ endif;
 
 				<!-- LOGS & EXPORT -->
 				<div id="swfo-panel-logging" class="swfo-tab-panel">
-					<h2 class="title">Logs &amp; Export</h2>
-					<p class="description">Lightweight in-memory/Redis queue; avoids DB bloat. Export to your SIEM if needed.</p>
+					<h2 class="title">
+						<?php echo esc_html__( 'Logs & Export', 'stop-woocommerce-fake-orders' ); ?>
+					</h2>
+
+					<p class="description">
+						<?php echo esc_html__( 'Lightweight in-memory/Redis queue; avoids DB bloat. Export to your SIEM if needed.', 'stop-woocommerce-fake-orders' ); ?>
+					</p>
+
 					<table class="form-table">
 						<tr>
-							<th>Keep last N events</th>
+							<th>
+								<?php echo esc_html__( 'Keep last N events', 'stop-woocommerce-fake-orders' ); ?>
+							</th>
 							<td>
-								<input type="number" name="logs_max" value="<?php echo esc_attr( get_option( SWFO_Opt::k( 'logs_max' ), 300 ) ); ?>" min="50" step="10">
-								<p class="description">Higher values show more history but use more memory.</p>
+								<input
+									type="number"
+									name="logs_max"
+									value="<?php echo esc_attr( get_option( SWFO_Opt::k( 'logs_max' ), 300 ) ); ?>"
+									min="50"
+									step="10"
+								/>
+								<p class="description">
+									<?php echo esc_html__( 'Higher values show more history but use more memory.', 'stop-woocommerce-fake-orders' ); ?>
+								</p>
 							</td>
 						</tr>
+
 						<tr>
-							<th>Export to <code>error_log</code></th>
+							<th>
+								<?php
+								/* translators: error_log function name */
+								printf(
+									esc_html__( 'Export to %s', 'stop-woocommerce-fake-orders' ),
+									'<code>error_log</code>'
+								);
+								?>
+							</th>
 							<td>
-								<label><input type="checkbox" name="log_to_error_log" <?php checked( get_option( SWFO_Opt::k( 'log_to_error_log' ), false ) ); ?>> Enable</label>
-								<p class="description">Writes events to PHP’s error log for quick tailing in ops environments.</p>
+								<label>
+									<input
+										type="checkbox"
+										name="log_to_error_log"
+										<?php checked( get_option( SWFO_Opt::k( 'log_to_error_log' ), false ) ); ?>
+									/>
+									<?php echo esc_html__( 'Enable', 'stop-woocommerce-fake-orders' ); ?>
+								</label>
+								<p class="description">
+									<?php echo esc_html__( 'Writes events to PHP’s error log for quick tailing in ops environments.', 'stop-woocommerce-fake-orders' ); ?>
+								</p>
 							</td>
 						</tr>
+
 						<tr>
-							<th>Webhook URL</th>
+							<th>
+								<?php echo esc_html__( 'Webhook URL', 'stop-woocommerce-fake-orders' ); ?>
+							</th>
 							<td>
-								<input type="url" name="webhook_url" style="width:60%" value="<?php echo esc_attr( get_option( SWFO_Opt::k( 'webhook_url' ), '' ) ); ?>">
-								<p class="description">If set, events are POSTed as JSON (<code>{t,type,note}</code>) to your endpoint (non-blocking).</p>
+								<input
+									type="url"
+									name="webhook_url"
+									style="width:60%"
+									value="<?php echo esc_attr( get_option( SWFO_Opt::k( 'webhook_url' ), '' ) ); ?>"
+								/>
+								<p class="description">
+									<?php
+									/* translators: JSON payload example */
+									printf(
+										esc_html__( 'If set, events are POSTed as JSON (%s) to your endpoint (non-blocking).', 'stop-woocommerce-fake-orders' ),
+										'<code>{t,type,note}</code>'
+									);
+									?>
+								</p>
 							</td>
 						</tr>
+
 						<tr>
-							<th>Enable API hit logging</th>
+							<th>
+								<?php echo esc_html__( 'Enable API hit logging', 'stop-woocommerce-fake-orders' ); ?>
+							</th>
 							<td>
-								<label><input type="checkbox" name="enable_api_hit_logging" <?php checked( get_option( SWFO_Opt::k( 'enable_api_hit_logging' ), true ) ); ?>> Enable</label>
-								<p class="description">Turn off to stop collecting new entries (existing entries are kept).</p>
+								<label>
+									<input
+										type="checkbox"
+										name="enable_api_hit_logging"
+										<?php checked( get_option( SWFO_Opt::k( 'enable_api_hit_logging' ), true ) ); ?>
+									/>
+									<?php echo esc_html__( 'Enable', 'stop-woocommerce-fake-orders' ); ?>
+								</label>
+								<p class="description">
+									<?php echo esc_html__( 'Turn off to stop collecting new entries (existing entries are kept).', 'stop-woocommerce-fake-orders' ); ?>
+								</p>
 							</td>
 						</tr>
+
 						<tr>
-							<th>Keep last N hits</th>
+							<th>
+								<?php echo esc_html__( 'Keep last N hits', 'stop-woocommerce-fake-orders' ); ?>
+							</th>
 							<td>
-								<input type="number" name="api_hits_max" value="<?php echo esc_attr( get_option( SWFO_Opt::k( 'api_hits_max' ), 1000 ) ); ?>" min="100" step="100">
-								<p class="description">Higher values keep more history (more memory in Redis/transients).</p>
+								<input
+									type="number"
+									name="api_hits_max"
+									value="<?php echo esc_attr( get_option( SWFO_Opt::k( 'api_hits_max' ), 1000 ) ); ?>"
+									min="100"
+									step="100"
+								/>
+								<p class="description">
+									<?php echo esc_html__( 'Higher values keep more history (more memory in Redis/transients).', 'stop-woocommerce-fake-orders' ); ?>
+								</p>
 							</td>
 						</tr>
 					</table>
@@ -1322,101 +1841,194 @@ endif;
 
 				<!-- STORE API -->
 				<div id="swfo-panel-storeapi" class="swfo-tab-panel">
-					<h2 class="title">Store API (wc/store)</h2>
-					<p class="description">Control public reads on <code>/wp-json/wc/store/*</code>. Default is <strong>Same-origin</strong> to block scrapers while allowing your front-end.</p>
+					<h2 class="title">
+						<?php echo esc_html__( 'Store API (wc/store)', 'stop-woocommerce-fake-orders' ); ?>
+					</h2>
+
+					<p class="description">
+						<?php
+						/* translators: REST endpoint path */
+						printf(
+							esc_html__( 'Control public reads on %s. Default is Same-origin to block scrapers while allowing your front-end.', 'stop-woocommerce-fake-orders' ),
+							'<code>/wp-json/wc/store/*</code>'
+						);
+						?>
+					</p>
+
 					<table class="form-table">
 						<tr>
-							<th>Mode</th>
+							<th>
+								<?php echo esc_html__( 'Mode', 'stop-woocommerce-fake-orders' ); ?>
+							</th>
 							<td>
 								<?php $mode = get_option( SWFO_Opt::k( 'store_api_mode' ), 'same-origin' ); ?>
 								<fieldset>
-									<label><input type="radio" name="store_api_mode" value="open" <?php checked( $mode, 'open' ); ?>> Open</label><br>
-									<label><input type="radio" name="store_api_mode" value="same-origin" <?php checked( $mode, 'same-origin' ); ?>> Same-origin required (default)</label><br>
-									<label><input type="radio" name="store_api_mode" value="js-cookie" <?php checked( $mode, 'js-cookie' ); ?>> JS cookie required</label><br>
-									<label><input type="radio" name="store_api_mode" value="api-key" <?php checked( $mode, 'api-key' ); ?>> API-key required</label>
+									<label>
+										<input
+											type="radio"
+											name="store_api_mode"
+											value="open"
+											<?php checked( $mode, 'open' ); ?>
+										/>
+										<?php echo esc_html__( 'Open', 'stop-woocommerce-fake-orders' ); ?>
+									</label>
+									<br />
+
+									<label>
+										<input
+											type="radio"
+											name="store_api_mode"
+											value="same-origin"
+											<?php checked( $mode, 'same-origin' ); ?>
+										/>
+										<?php echo esc_html__( 'Same-origin required (default)', 'stop-woocommerce-fake-orders' ); ?>
+									</label>
+									<br />
+
+									<label>
+										<input
+											type="radio"
+											name="store_api_mode"
+											value="js-cookie"
+											<?php checked( $mode, 'js-cookie' ); ?>
+										/>
+										<?php echo esc_html__( 'JS cookie required', 'stop-woocommerce-fake-orders' ); ?>
+									</label>
+									<br />
+
+									<label>
+										<input
+											type="radio"
+											name="store_api_mode"
+											value="api-key"
+											<?php checked( $mode, 'api-key' ); ?>
+										/>
+										<?php echo esc_html__( 'API-key required', 'stop-woocommerce-fake-orders' ); ?>
+									</label>
 								</fieldset>
+
 								<p class="description">
-									<strong>Same-origin:</strong> blocks cross-site scrapers (checks <code>Origin/Referer</code>).<br>
-									<strong>JS cookie:</strong> ensures a real browser (uses your JS challenge cookie).<br>
-									<strong>API-key:</strong> require <code>X-WC-API-Key</code> even for GET reads (most strict).
+									<strong><?php echo esc_html__( 'Same-origin:', 'stop-woocommerce-fake-orders' ); ?></strong>
+									<?php
+									/* translators: HTTP headers */
+									printf(
+										esc_html__( 'blocks cross-site scrapers (checks %1$s/%2$s).', 'stop-woocommerce-fake-orders' ),
+										'<code>Origin</code>',
+										'<code>Referer</code>'
+									);
+									?>
+									<br />
+
+									<strong><?php echo esc_html__( 'JS cookie:', 'stop-woocommerce-fake-orders' ); ?></strong>
+									<?php echo esc_html__( 'ensures a real browser (uses your JS challenge cookie).', 'stop-woocommerce-fake-orders' ); ?>
+									<br />
+
+									<strong><?php echo esc_html__( 'API-key:', 'stop-woocommerce-fake-orders' ); ?></strong>
+									<?php
+									/* translators: HTTP header name */
+									printf(
+										esc_html__( 'require %s even for GET reads (most strict).', 'stop-woocommerce-fake-orders' ),
+										'<code>X-WC-API-Key</code>'
+									);
+									?>
 								</p>
 							</td>
 						</tr>
+
 						<tr>
-							<th>GET rate limit</th>
+							<th>
+								<?php echo esc_html__( 'GET rate limit', 'stop-woocommerce-fake-orders' ); ?>
+							</th>
 							<td>
-								<input type="number" name="store_api_rate_limit" value="<?php echo esc_attr( get_option( SWFO_Opt::k( 'store_api_rate_limit' ), 120 ) ); ?>" min="10" step="10">
-								<p class="description">Per-IP caps for Store API GETs within the window.</p>
+								<input
+									type="number"
+									name="store_api_rate_limit"
+									value="<?php echo esc_attr( get_option( SWFO_Opt::k( 'store_api_rate_limit' ), 120 ) ); ?>"
+									min="10"
+									step="10"
+								/>
+								<p class="description">
+									<?php echo esc_html__( 'Per-IP caps for Store API GETs within the window.', 'stop-woocommerce-fake-orders' ); ?>
+								</p>
 							</td>
 						</tr>
 					</table>
 				</div>
 
-				<?php submit_button( 'Save Settings', 'primary', 'swfo_save' ); ?>
+				<?php submit_button( esc_html__( 'Save Settings', 'stop-woocommerce-fake-orders' ), 'primary', 'swfo_save' ); ?>
+			
 			</form>
 
 			<!-- RECENT EVENTS -->
 			<div id="swfo-panel-events" class="swfo-tab-panel">
-				<h2 class="title">Recent Events</h2>					
-				<?php
-				// --- Filters (GET): events_q (search), events_type (type), events_p (page)
-				$ev_q    = isset( $_GET['events_q'] ) ? sanitize_text_field( wp_unslash( $_GET['events_q'] ) ) : '';
-				$ev_type = isset( $_GET['events_type'] ) ? sanitize_text_field( wp_unslash( $_GET['events_type'] ) ) : '';
-				$ev_p    = isset( $_GET['events_p'] ) ? max( 1, intval( wp_unslash( $_GET['events_p'] ) ) ) : 1;
+				<h2 class="title">
+					<?php echo esc_html__( 'Recent Events', 'stop-woocommerce-fake-orders' ); ?>
+				</h2>
 
-				// unique types for dropdown
+				<?php
+				// Filters (GET): events_q (search), events_type (type), events_p (page).
+				$ev_q    = isset( $_GET['events_q'] ) ? sanitize_text_field( wp_unslash( $_GET['events_q'] ) ) : ''; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+				$ev_type = isset( $_GET['events_type'] ) ? sanitize_text_field( wp_unslash( $_GET['events_type'] ) ) : ''; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+				$ev_p    = isset( $_GET['events_p'] ) ? max( 1, (int) wp_unslash( $_GET['events_p'] ) ) : 1;          // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+
+				// Unique types for dropdown.
 				$types = array_values(
 					array_unique(
 						array_map(
-							function ( $r ) {
-								return $r['type'] ?? '';
+							static function ( $r ) {
+								return isset( $r['type'] ) ? (string) $r['type'] : '';
 							},
-							$logs
+							(array) $logs
 						)
 					)
 				);
 				sort( $types );
 
-				// apply filters
+				// Apply filters (search + type).
 				$logs_f = array_values(
 					array_filter(
-						$logs,
-						function ( $r ) use ( $ev_q, $ev_type ) {
-							$ok = true;
-							if ( $ev_type !== '' ) {
-								$ok = $ok && ( isset( $r['type'] ) && stripos( $r['type'], $ev_type ) !== false );
+						(array) $logs,
+						static function ( $r ) use ( $ev_q, $ev_type ) {
+							$type = isset( $r['type'] ) ? (string) $r['type'] : '';
+							$note = isset( $r['note'] ) ? (string) $r['note'] : '';
+
+							if ( '' !== $ev_type && false === stripos( $type, $ev_type ) ) {
+								return false;
 							}
-							if ( $ev_q !== '' ) {
-								$hay = strtolower( ( ( $r['type'] ?? '' ) . ' ' . ( $r['note'] ?? '' ) ) );
-								$ok  = $ok && ( strpos( $hay, strtolower( $ev_q ) ) !== false );
+							if ( '' !== $ev_q ) {
+								$hay = strtolower( $type . ' ' . $note );
+								if ( false === strpos( $hay, strtolower( $ev_q ) ) ) {
+									return false;
+								}
 							}
-							return $ok;
+							return true;
 						}
 					)
 				);
 
-				list($rows, $cur, $pages, $total) = $this->paginate_array( $logs_f, $ev_p, 50 );
+				list( $rows, $cur, $pages, $total ) = $this->paginate_array( $logs_f, $ev_p, 50 );
 				?>
 
 				<form method="get" class="search-form" style="margin:6px 0;">
-					<input type="hidden" name="page" value="swfo">
-					<input type="hidden" name="swfo_tab" value="events">
-					<input type="search" name="events_q" value="<?php echo esc_attr( $ev_q ); ?>" placeholder="Search note/type…">
+					<input type="hidden" name="page" value="<?php echo esc_attr( 'swfo' ); ?>" />
+					<input type="hidden" name="swfo_tab" value="<?php echo esc_attr( 'events' ); ?>" />
+					<input type="search" name="events_q" value="<?php echo esc_attr( $ev_q ); ?>" placeholder="<?php echo esc_attr__( 'Search note/type…', 'stop-woocommerce-fake-orders' ); ?>" />
 					<select name="events_type">
-						<option value="">All types</option>
-						<?php
-						foreach ( $types as $t ) :
-							if ( $t === '' ) {
-								continue;}
+						<option value=""><?php echo esc_html__( 'All types', 'stop-woocommerce-fake-orders' ); ?></option>
+						<?php foreach ( $types as $t ) : ?>
+							<?php
+							if ( '' === $t ) {
+								continue; }
 							?>
 							<option value="<?php echo esc_attr( $t ); ?>" <?php selected( $ev_type, $t ); ?>><?php echo esc_html( $t ); ?></option>
 						<?php endforeach; ?>
 					</select>
-					<button class="button">Filter</button>
-					<a class="button" href="<?php echo esc_url( $this->tab_url( 'events' ) ); ?>">Reset</a>
+					<button class="button" type="submit"><?php echo esc_html__( 'Filter', 'stop-woocommerce-fake-orders' ); ?></button>
+					<a class="button" href="<?php echo esc_url( $this->tab_url( 'events' ) ); ?>"><?php echo esc_html__( 'Reset', 'stop-woocommerce-fake-orders' ); ?></a>
 				</form>
 
 				<?php
+				// Top pager.
 				$this->render_pager(
 					'events',
 					'events_p',
@@ -1430,23 +2042,30 @@ endif;
 				?>
 
 				<?php if ( empty( $rows ) ) : ?>
-					<p><em>No matching events.</em></p>
+					<p><em><?php echo esc_html__( 'No matching events.', 'stop-woocommerce-fake-orders' ); ?></em></p>
 				<?php else : ?>
 					<table class="widefat striped">
-						<thead><tr><th style="width:160px;">Time</th><th style="width:180px;">Type</th><th>Note</th></tr></thead>
-						<tbody id="swfo-events-body">
-						<?php foreach ( $rows as $l ) : ?>
+						<thead>
 							<tr>
-								<td><?php echo esc_html( date( 'Y-m-d H:i:s', $l['t'] ) ); ?></td>
-								<td><?php echo esc_html( $l['type'] ); ?></td>
-								<td><?php echo esc_html( $l['note'] ); ?></td>
+								<th style="width:160px;"><?php echo esc_html__( 'Time', 'stop-woocommerce-fake-orders' ); ?></th>
+								<th style="width:180px;"><?php echo esc_html__( 'Type', 'stop-woocommerce-fake-orders' ); ?></th>
+								<th><?php echo esc_html__( 'Note', 'stop-woocommerce-fake-orders' ); ?></th>
 							</tr>
-						<?php endforeach; ?>
+						</thead>
+						<tbody id="swfo-events-body">
+							<?php foreach ( $rows as $l ) : ?>
+								<tr>
+									<td><?php echo esc_html( wp_date( 'Y-m-d H:i:s', isset( $l['t'] ) ? (int) $l['t'] : time() ) ); ?></td>
+									<td><?php echo esc_html( isset( $l['type'] ) ? (string) $l['type'] : '' ); ?></td>
+									<td><?php echo esc_html( isset( $l['note'] ) ? (string) $l['note'] : '' ); ?></td>
+								</tr>
+							<?php endforeach; ?>
 						</tbody>
 					</table>
 				<?php endif; ?>
 
 				<?php
+				// Bottom pager.
 				$this->render_pager(
 					'events',
 					'events_p',
@@ -1458,13 +2077,26 @@ endif;
 					)
 				);
 				?>
-				<p class="description"><?php echo intval( $total ); ?> event(s) total after filter.</p>
+
+				<p class="description">
+					<?php
+					printf(
+						/* translators: %d: number of events */
+						esc_html__( '%d event(s) total after filter.', 'stop-woocommerce-fake-orders' ),
+						(int) $total
+					);
+					?>
+				</p>
 			</div>
 
 			<!-- API HITS -->
 			<div id="swfo-panel-apihits" class="swfo-tab-panel">
-				<h2 class="title">API Hits (wp-json)</h2>
-				<p class="description">Newest first. Logs every REST request (including WooCommerce). Sensitive fields are masked.</p>
+				<h2 class="title">
+					<?php echo esc_html__( 'API Hits (wp-json)', 'stop-woocommerce-fake-orders' ); ?>
+				</h2>
+				<p class="description">
+					<?php echo esc_html__( 'Newest first. Logs every REST request (including WooCommerce). Sensitive fields are masked.', 'stop-woocommerce-fake-orders' ); ?>
+				</p>
 
 				<div class="swfo-two-col">
 					<div>
@@ -1473,27 +2105,35 @@ endif;
 						$clear_url  = wp_nonce_url( admin_url( 'admin-post.php?action=swfo_clear_hits' ), 'swfo_clear_hits' );
 						?>
 						<div style="margin:8px 0;">
-							<a class="button button-secondary" href="<?php echo esc_url( $export_url ); ?>">Export CSV</a>
-							<a class="button button-link-delete" href="<?php echo esc_url( $clear_url ); ?>"
-								onclick="return confirm('Clear all API hits?');">Clear hits</a>
+							<a class="button button-secondary" href="<?php echo esc_url( $export_url ); ?>">
+								<?php echo esc_html__( 'Export CSV', 'stop-woocommerce-fake-orders' ); ?>
+							</a>
+							<a
+								class="button button-link-delete"
+								href="<?php echo esc_url( $clear_url ); ?>"
+								onclick="return confirm('<?php echo esc_js( __( 'Clear all API hits?', 'stop-woocommerce-fake-orders' ) ); ?>');"
+							>
+								<?php echo esc_html__( 'Clear hits', 'stop-woocommerce-fake-orders' ); ?>
+							</a>
 						</div>
 					</div>
 				</div>
 
 				<?php
-				$hits = $this->api_hits_get();
+				$hits = (array) $this->api_hits_get();
 
-				// Filters: hits_q (path/data), hits_ip, hits_method, hits_p
-				$h_q  = isset( $_GET['hits_q'] ) ? sanitize_text_field( wp_unslash( $_GET['hits_q'] ) ) : '';
-				$h_ip = isset( $_GET['hits_ip'] ) ? sanitize_text_field( wp_unslash( $_GET['hits_ip'] ) ) : '';
-				$h_m  = isset( $_GET['hits_m'] ) ? strtoupper( sanitize_text_field( wp_unslash( $_GET['hits_m'] ) ) ) : '';
-				$h_p  = isset( $_GET['hits_p'] ) ? max( 1, intval( wp_unslash( $_GET['hits_p'] ) ) ) : 1;
+				// Filters: hits_q (path/data), hits_ip, hits_method, hits_p.
+				$h_q  = isset( $_GET['hits_q'] ) ? sanitize_text_field( wp_unslash( $_GET['hits_q'] ) ) : ''; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+				$h_ip = isset( $_GET['hits_ip'] ) ? sanitize_text_field( wp_unslash( $_GET['hits_ip'] ) ) : ''; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+				$h_m  = isset( $_GET['hits_m'] ) ? strtoupper( sanitize_text_field( wp_unslash( $_GET['hits_m'] ) ) ) : ''; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+				$h_p  = isset( $_GET['hits_p'] ) ? max( 1, (int) wp_unslash( $_GET['hits_p'] ) ) : 1; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
 
+				// Build methods list.
 				$methods = array_values(
 					array_unique(
 						array_map(
-							function ( $r ) {
-								return strtoupper( $r['m'] ?? '' );
+							static function ( $r ) {
+								return strtoupper( isset( $r['m'] ) ? (string) $r['m'] : '' );
 							},
 							$hits
 						)
@@ -1501,49 +2141,57 @@ endif;
 				);
 				sort( $methods );
 
+				// Apply filters.
 				$hits_f = array_values(
 					array_filter(
 						$hits,
-						function ( $r ) use ( $h_q, $h_ip, $h_m ) {
-							$ok = true;
-							if ( $h_ip !== '' ) {
-								$ok = $ok && ( isset( $r['ip'] ) && stripos( $r['ip'], $h_ip ) !== false );
+						static function ( $r ) use ( $h_q, $h_ip, $h_m ) {
+							$ip   = isset( $r['ip'] ) ? (string) $r['ip'] : '';
+							$met  = strtoupper( isset( $r['m'] ) ? (string) $r['m'] : '' );
+							$path = isset( $r['path'] ) ? (string) $r['path'] : ( isset( $r['route'] ) ? (string) $r['route'] : '' );
+							$data = isset( $r['data'] ) ? $r['data'] : '';
+
+							if ( '' !== $h_ip && false === stripos( $ip, $h_ip ) ) {
+								return false;
 							}
-							if ( $h_m !== '' ) {
-								$ok = $ok && ( strtoupper( $r['m'] ?? '' ) === $h_m );
+							if ( '' !== $h_m && $met !== $h_m ) {
+								return false;
 							}
-							if ( $h_q !== '' ) {
-								$hay = strtolower( ( $r['path'] ?? '' ) . ' ' . ( $r['route'] ?? '' ) . ' ' . wp_json_encode( $r['data'] ?? '' ) );
-								$ok  = $ok && ( strpos( $hay, strtolower( $h_q ) ) !== false );
+							if ( '' !== $h_q ) {
+								$hay = strtolower( $path . ' ' . wp_json_encode( $data ) );
+								if ( false === strpos( $hay, strtolower( $h_q ) ) ) {
+									return false;
+								}
 							}
-							return $ok;
+							return true;
 						}
 					)
 				);
 
-				list($rows, $cur, $pages, $total) = $this->paginate_array( $hits_f, $h_p, 50 );
+				list( $rows, $cur, $pages, $total ) = $this->paginate_array( $hits_f, $h_p, 50 );
 				?>
 
 				<form method="get" class="search-form" style="margin:6px 0;">
-					<input type="hidden" name="page" value="swfo">
-					<input type="hidden" name="swfo_tab" value="apihits">
-					<input type="search" name="hits_q" value="<?php echo esc_attr( $h_q ); ?>" placeholder="Search path/data…">
-					<input type="text" name="hits_ip" value="<?php echo esc_attr( $h_ip ); ?>" placeholder="IP">
+					<input type="hidden" name="page" value="<?php echo esc_attr( 'swfo' ); ?>" />
+					<input type="hidden" name="swfo_tab" value="<?php echo esc_attr( 'apihits' ); ?>" />
+					<input type="search" name="hits_q" value="<?php echo esc_attr( $h_q ); ?>" placeholder="<?php echo esc_attr__( 'Search path/data…', 'stop-woocommerce-fake-orders' ); ?>" />
+					<input type="text" name="hits_ip" value="<?php echo esc_attr( $h_ip ); ?>" placeholder="<?php echo esc_attr__( 'IP', 'stop-woocommerce-fake-orders' ); ?>" />
 					<select name="hits_m">
-						<option value="">Any method</option>
-						<?php
-						foreach ( $methods as $m ) :
-							if ( $m === '' ) {
-								continue;}
+						<option value=""><?php echo esc_html__( 'Any method', 'stop-woocommerce-fake-orders' ); ?></option>
+						<?php foreach ( $methods as $m ) : ?>
+							<?php
+							if ( '' === $m ) {
+								continue; }
 							?>
 							<option value="<?php echo esc_attr( $m ); ?>" <?php selected( $h_m, $m ); ?>><?php echo esc_html( $m ); ?></option>
 						<?php endforeach; ?>
 					</select>
-					<button class="button">Filter</button>
-					<a class="button" href="<?php echo esc_url( $this->tab_url( 'apihits' ) ); ?>">Reset</a>
+					<button class="button" type="submit"><?php echo esc_html__( 'Filter', 'stop-woocommerce-fake-orders' ); ?></button>
+					<a class="button" href="<?php echo esc_url( $this->tab_url( 'apihits' ) ); ?>"><?php echo esc_html__( 'Reset', 'stop-woocommerce-fake-orders' ); ?></a>
 				</form>
 
 				<?php
+				// Top pager.
 				$this->render_pager(
 					'apihits',
 					'hits_p',
@@ -1558,40 +2206,45 @@ endif;
 				?>
 
 				<?php if ( empty( $rows ) ) : ?>
-					<p><em>No matching hits.</em></p>
+					<p><em><?php echo esc_html__( 'No matching hits.', 'stop-woocommerce-fake-orders' ); ?></em></p>
 				<?php else : ?>
 					<table class="widefat striped">
 						<thead>
 							<tr>
-								<th style="width:160px;">Date/Time</th>
-								<th style="width:110px;">IP</th>
-								<th style="width:80px;">Method</th>
-								<th>Path</th>
-								<th>Data (masked)</th>
+								<th style="width:160px;"><?php echo esc_html__( 'Date/Time', 'stop-woocommerce-fake-orders' ); ?></th>
+								<th style="width:110px;"><?php echo esc_html__( 'IP', 'stop-woocommerce-fake-orders' ); ?></th>
+								<th style="width:80px;"><?php echo esc_html__( 'Method', 'stop-woocommerce-fake-orders' ); ?></th>
+								<th><?php echo esc_html__( 'Path', 'stop-woocommerce-fake-orders' ); ?></th>
+								<th><?php echo esc_html__( 'Data (masked)', 'stop-woocommerce-fake-orders' ); ?></th>
 							</tr>
 						</thead>
 						<tbody id="swfo-hits-body">
-							<?php
-							foreach ( $rows as $h ) :
-								$dt = isset( $h['t'] ) ? date( 'Y-m-d H:i:s', (int) $h['t'] ) : '';
-								$ip = esc_html( $h['ip'] ?? '' );
-								$m  = esc_html( strtoupper( $h['m'] ?? '' ) );
-								$p  = esc_html( $h['path'] ?? ( $h['route'] ?? '' ) );
-								$d  = is_array( $h['data'] ) ? wp_json_encode( $h['data'] ) : (string) ( $h['data'] ?? '' );
+							<?php foreach ( $rows as $h ) : ?>
+								<?php
+								$dt = isset( $h['t'] ) ? wp_date( 'Y-m-d H:i:s', (int) $h['t'] ) : '';
+								$ip = isset( $h['ip'] ) ? (string) $h['ip'] : '';
+								$m  = strtoupper( isset( $h['m'] ) ? (string) $h['m'] : '' );
+								$p  = isset( $h['path'] ) ? (string) $h['path'] : ( isset( $h['route'] ) ? (string) $h['route'] : '' );
+								$d  = isset( $h['data'] ) && is_array( $h['data'] ) ? wp_json_encode( $h['data'] ) : (string) ( $h['data'] ?? '' );
 								?>
-							<tr>
-								<td><?php echo esc_html( $dt ); ?></td>
-								<td><code><?php echo $ip; ?></code></td>
-								<td><?php echo $m; ?></td>
-								<td><code><?php echo $p; ?></code></td>
-								<td><code style="white-space:pre-wrap;word-break:break-word;display:block;max-height:6.5em;overflow:auto;"><?php echo esc_html( mb_substr( $d, 0, 3000 ) ); ?></code></td>
-							</tr>
+								<tr>
+									<td><?php echo esc_html( $dt ); ?></td>
+									<td><code><?php echo esc_html( $ip ); ?></code></td>
+									<td><?php echo esc_html( $m ); ?></td>
+									<td><code><?php echo esc_html( $p ); ?></code></td>
+									<td>
+										<code style="white-space:pre-wrap;word-break:break-word;display:block;max-height:6.5em;overflow:auto;">
+											<?php echo esc_html( mb_substr( $d, 0, 3000 ) ); ?>
+										</code>
+									</td>
+								</tr>
 							<?php endforeach; ?>
 						</tbody>
 					</table>
 				<?php endif; ?>
 
 				<?php
+				// Bottom pager.
 				$this->render_pager(
 					'apihits',
 					'hits_p',
@@ -1604,38 +2257,17 @@ endif;
 					)
 				);
 				?>
-				<p class="description"><?php echo intval( $total ); ?> hit(s) total after filter.</p>
 
+				<p class="description">
+					<?php
+					printf(
+						/* translators: %d: number of hits */
+						esc_html__( '%d hit(s) total after filter.', 'stop-woocommerce-fake-orders' ),
+						(int) $total
+					);
+					?>
+				</p>
 			</div>
-
-			<script>
-			(function(){
-				function sel(q){return document.querySelector(q)}
-				function all(q){return Array.prototype.slice.call(document.querySelectorAll(q))}
-				function activate(tab){
-					all('.nav-tab').forEach(a=>a.classList.remove('nav-tab-active'));
-					var nav = sel('.nav-tab[data-tab="'+tab+'"]'); if(nav) nav.classList.add('nav-tab-active');
-					all('.swfo-tab-panel').forEach(p=>p.classList.remove('is-active'));
-					var panel = sel('#swfo-panel-' + tab); if(panel) panel.classList.add('is-active');
-					var hidden = sel('#swfo_tab'); if(hidden) hidden.value = tab; // <-- keep form in sync
-				}
-				var params = new URLSearchParams(location.search);
-				var tab = params.get('swfo_tab') || (location.hash||'#status').replace('#','');
-				if(!document.getElementById('swfo-panel-'+tab)) tab='status';
-				activate(tab);
-				all('.nav-tab').forEach(a=>{
-					a.addEventListener('click', function(e){
-						e.preventDefault();
-						var t = this.getAttribute('data-tab');
-						var url = new URL(location.href);
-						url.searchParams.set('swfo_tab', t);
-						url.hash = t;
-						history.replaceState(null,'',url.toString());
-						activate(t);
-					});
-				});
-			})();
-			</script>
 		</div>
 		<?php
 	}
@@ -1678,51 +2310,112 @@ endif;
 	 * @return void
 	 */
 	function save_settings() {
-		$fields = array(
-			'window_seconds',
-			'ip_rate_limit',
-			'email_rate_limit',
+		// ---- Simple numeric fields with constraints.
+		$numeric = array(
+			'window_seconds'            => array(
+				'min' => 10,
+				'max' => null,
+			),
+			'ip_rate_limit'             => array(
+				'min' => 5,
+				'max' => null,
+			),
+			'email_rate_limit'          => array(
+				'min' => 1,
+				'max' => null,
+			),
+			'logs_max'                  => array(
+				'min' => 50,
+				'max' => null,
+			),
+			'captcha_after_soft_blocks' => array(
+				'min' => 0,
+				'max' => null,
+			),
+			'api_hits_max'              => array(
+				'min' => 100,
+				'max' => null,
+			),
+			'store_api_rate_limit'      => array(
+				'min' => 10,
+				'max' => null,
+			),
+			'redis_port'                => array(
+				'min' => 1,
+				'max' => 65535,
+			),
+			'redis_db'                  => array(
+				'min' => 0,
+				'max' => null,
+			), // ignored if constant set.
+		);
+
+		// ---- Plain text fields.
+		$text = array(
 			'required_cookie',
 			'hmac_secret',
 			'redis_host',
-			'redis_port',
-			'logs_max',
-			'webhook_url',
-			'captcha_after_soft_blocks',
 		);
-		foreach ( $fields as $f ) {
-			if ( isset( $_POST[ $f ] ) ) {
-				update_option( SWFO_Opt::k( $f ), is_numeric( wp_unslash( $_POST[ $f ] ) ) ? intval( wp_unslash( $_POST[ $f ] ) ) : sanitize_text_field( wp_unslash( $_POST[ $f ] ) ) );
+
+		// ---- Checkboxes (booleans).
+		$checks = array(
+			'enable_js_challenge',
+			'enable_honeypot',
+			'enable_hmac',
+			'use_redis',
+			'log_to_error_log',
+			'captcha_enabled',
+			'enable_api_hit_logging',
+		);
+
+		// ---- Save numerics.
+		foreach ( $numeric as $key => $bounds ) {
+			if ( isset( $_POST[ $key ] ) ) {
+				$raw = wp_unslash( $_POST[ $key ] );
+				$val = is_numeric( $raw ) ? (int) $raw : 0;
+				if ( null !== $bounds['min'] ) {
+					$val = max( (int) $bounds['min'], $val );
+				}
+				if ( null !== $bounds['max'] ) {
+					$val = min( (int) $bounds['max'], $val );
+				}
+
+				// Respect constants for Redis DB.
+				if ( 'redis_db' === $key && defined( 'SWFO_REDIS_DB' ) ) {
+					continue;
+				}
+
+				update_option( SWFO_Opt::k( $key ), $val );
 			}
 		}
-		update_option( SWFO_Opt::k( 'enable_js_challenge' ), isset( $_POST['enable_js_challenge'] ) );
-		update_option( SWFO_Opt::k( 'enable_honeypot' ), isset( $_POST['enable_honeypot'] ) );
-		update_option( SWFO_Opt::k( 'enable_hmac' ), isset( $_POST['enable_hmac'] ) );
-		update_option( SWFO_Opt::k( 'use_redis' ), isset( $_POST['use_redis'] ) );
-		update_option( SWFO_Opt::k( 'log_to_error_log' ), isset( $_POST['log_to_error_log'] ) );
-		update_option( SWFO_Opt::k( 'captcha_enabled' ), isset( $_POST['captcha_enabled'] ) );
 
-		if ( isset( $_POST['api_hits_max'] ) ) {
-			update_option( SWFO_Opt::k( 'api_hits_max' ), max( 100, intval( $_POST['api_hits_max'] ) ) );
+		// ---- Save text.
+		foreach ( $text as $key ) {
+			if ( isset( $_POST[ $key ] ) ) {
+				update_option( SWFO_Opt::k( $key ), sanitize_text_field( wp_unslash( $_POST[ $key ] ) ) );
+			}
 		}
-		update_option( SWFO_Opt::k( 'enable_api_hit_logging' ), isset( $_POST['enable_api_hit_logging'] ) );
 
-		// Redis auth/db (respect constants if defined)
+		// ---- Webhook URL (url-safe).
+		if ( isset( $_POST['webhook_url'] ) ) {
+			update_option( SWFO_Opt::k( 'webhook_url' ), esc_url_raw( wp_unslash( $_POST['webhook_url'] ) ) );
+		}
+
+		// ---- Checkboxes.
+		foreach ( $checks as $key ) {
+			update_option( SWFO_Opt::k( $key ), ! empty( $_POST[ $key ] ) );
+		}
+
+		// ---- Redis auth (respect constant).
 		if ( ! defined( 'SWFO_REDIS_AUTH' ) && isset( $_POST['redis_auth'] ) ) {
-			$val = sanitize_text_field( wp_unslash( $_POST['redis_auth'] ) );
-			// Treat ******** as mask ONLY if that exact value was shown by us
-			$masked = '********';
+			$val    = sanitize_text_field( wp_unslash( $_POST['redis_auth'] ) );
+			$masked = '********'; // Only ignore if exact mask string we render.
 			if ( $val !== $masked ) {
 				update_option( SWFO_Opt::k( 'redis_auth' ), $val );
 			}
 		}
-		if ( ! defined( 'SWFO_REDIS_DB' ) && isset( $_POST['redis_db'] ) ) {
-			update_option( SWFO_Opt::k( 'redis_db' ), max( 0, (int) $_POST['redis_db'] ) );
-		}
 
-		if ( isset( $_POST['store_api_rate_limit'] ) ) {
-			update_option( SWFO_Opt::k( 'store_api_rate_limit' ), max( 10, intval( $_POST['store_api_rate_limit'] ) ) );
-		}
+		// ---- Store API mode (enum).
 		if ( isset( $_POST['store_api_mode'] ) ) {
 			$m = sanitize_text_field( wp_unslash( $_POST['store_api_mode'] ) );
 			if ( in_array( $m, array( 'open', 'same-origin', 'js-cookie', 'api-key' ), true ) ) {
@@ -1730,13 +2423,15 @@ endif;
 			}
 		}
 
-		foreach ( array( 'allowlist_cidrs', 'ua_denylist', 'soft_deny_cidrs' ) as $arr ) {
-			$lines = isset( $_POST[ $arr ] ) ? array_filter( array_map( 'trim', explode( "\n", $_POST[ $arr ] ) ) ) : array();
-			update_option( SWFO_Opt::k( $arr ), $lines );
-		}
-
-		if ( isset( $_POST['webhook_url'] ) ) {
-			update_option( SWFO_Opt::k( 'webhook_url' ), esc_url_raw( $_POST['webhook_url'] ) );
+		// ---- Multiline arrays: allow/deny lists.
+		foreach ( array( 'allowlist_cidrs', 'ua_denylist', 'soft_deny_cidrs' ) as $arr_key ) {
+			if ( isset( $_POST[ $arr_key ] ) ) {
+				$raw   = wp_unslash( $_POST[ $arr_key ] );
+				$raw   = str_replace( array( "\r\n", "\r" ), "\n", (string) $raw );
+				$lines = array_filter( array_map( 'trim', explode( "\n", $raw ) ) );
+				$lines = array_map( 'sanitize_text_field', $lines );
+				update_option( SWFO_Opt::k( $arr_key ), $lines );
+			}
 		}
 	}
 
@@ -1763,7 +2458,7 @@ endif;
 	 * @return void
 	 */
 	function handle_generate_key() {
-		if ( ! current_user_can( 'manage_options' ) ) {
+		if ( ! current_user_can( 'manage_options' ) || ! wp_verify_nonce( $_GET['_wpnonce'] ?? '', 'swfo_gen_key' ) ) {
 			wp_die( 'Forbidden' );
 		}
 		$key          = bin2hex( random_bytes( 24 ) );
@@ -2182,6 +2877,21 @@ endif;
 				if ( get_option( SWFO_Opt::k( 'captcha_enabled' ), true ) ) {
 					$ans = $request->get_param( 'swfo_captcha' );
 					$op  = $request->get_param( 'swfo_captcha_op' );
+					if ( ! $this->captcha_verify( $ans, $request->get_param( 'swfo_captcha_nonce' ), $op ) ) {
+						return new WP_Error( 'swfo_need_captcha', 'Captcha required', array( 'status' => 403 ) );
+					}
+				}
+
+				$need_captcha = false;
+				$thresh       = (int) get_option( SWFO_Opt::k( 'captcha_after_soft_blocks' ), 3 );
+				if ( $thresh <= 0 ) {
+					$need_captcha = true;
+				} else {
+					$soft = (int) $this->get_counter( 'soft_blocks_ip:' . $ip ); // implement get_counter()
+					if ( $soft >= $thresh ) {
+						$need_captcha = true; }
+				}
+				if ( $need_captcha ) {
 					if ( ! $this->captcha_verify( $ans, $request->get_param( 'swfo_captcha_nonce' ), $op ) ) {
 						return new WP_Error( 'swfo_need_captcha', 'Captcha required', array( 'status' => 403 ) );
 					}

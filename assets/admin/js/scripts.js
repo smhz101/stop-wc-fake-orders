@@ -47,6 +47,42 @@
     );
   }
 
+  // ---------- Tabs: activation + URL sync (moved from PHP inline) ----------
+  // Keeps .nav-tab active state, shows matching .swfo-tab-panel, syncs hidden input and URL (?swfo_tab= & #hash)
+  function activateTab(tab) {
+    $('.nav-tab').removeClass('nav-tab-active');
+    $('.nav-tab[data-tab="' + tab + '"]').addClass('nav-tab-active');
+
+    $('.swfo-tab-panel').removeClass('is-active');
+    $('#swfo-panel-' + tab).addClass('is-active');
+
+    var $hidden = $('#swfo_tab'); // keep form field in sync if present
+    if ($hidden.length) $hidden.val(tab);
+  }
+
+  function getInitialTab() {
+    var params = new URLSearchParams(window.location.search);
+    var tab = params.get('swfo_tab') || (window.location.hash || '#status').replace('#', '');
+    if (!document.getElementById('swfo-panel-' + tab)) tab = 'status';
+    return tab;
+  }
+
+  $(function initTabs() {
+    var initial = getInitialTab();
+    activateTab(initial);
+
+    $(document).on('click', '.nav-tab', function (e) {
+      e.preventDefault();
+      var t = String($(this).data('tab') || 'status');
+      var url = new URL(window.location.href);
+      url.searchParams.set('swfo_tab', t);
+      url.hash = t;
+      window.history.replaceState(null, '', url.toString());
+      activateTab(t);
+      // Note: live polling below reacts to active tab (it has its own click listener too).
+    });
+  });
+
   // ---------- Charts ----------
   $(function initCharts() {
     if (!window.SWFOData || !SWFOData.charts) return;
@@ -255,7 +291,7 @@
       if ($rows.length > limit) $rows.slice(limit).remove();
     }
 
-    // Tab click: start/stop polling by active tab
+    // Tab click: start/stop polling by active tab (activation happens in Tabs section)
     $(document).on('click', '.nav-tab', function () {
       setTimeout(function () {
         var tab = activeTab();

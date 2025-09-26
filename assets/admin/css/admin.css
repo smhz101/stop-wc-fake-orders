@@ -1,3 +1,21 @@
+/* Tabs: Minimal, native-looking, panels hidden by default */
+.swfo-tab-panel {
+	display: none;
+}
+.swfo-tab-panel.is-active {
+	display: block;
+}
+.swfo-two-col {
+	display: grid;
+	grid-template-columns: 1fr 1fr;
+	gap: 16px;
+}
+@media (max-width: 1000px) {
+	.swfo-two-col {
+		grid-template-columns: 1fr;
+	}
+}
+
 /* Responsive chart grid that never causes horizontal scroll */
 .swfo-chart-grid {
 	display: grid;
